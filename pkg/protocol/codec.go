@@ -21,8 +21,10 @@ func WriteFrame(wrt io.Writer, frameType byte, payload []byte) error {
 	if _, err := wrt.Write(header); err != nil {
 		return err
 	}
-	if _, err := wrt.Write(payload); err != nil {
-		return err
+	if len(payload) > 0 {
+		if _, err := wrt.Write(payload); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -34,9 +36,12 @@ func ReadFrame(rd io.Reader) (*Frame, error) {
 	}
 	frameType := header[0]
 	length := Uint24(header[1:])
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(rd, payload); err != nil {
-		return nil, err
+	if length > 0 {
+		payload := make([]byte, length)
+		if _, err := io.ReadFull(rd, payload); err != nil {
+			return nil, err
+		}
+		return &Frame{Type: frameType, Payload: payload}, nil
 	}
-	return &Frame{Type: frameType, Payload: payload}, nil
+	return &Frame{Type: frameType, Payload: nil}, nil
 }
