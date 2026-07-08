@@ -43,11 +43,7 @@ func uint16ToBytes(val uint16) []byte {
 	return b
 }
 
-func RunListener(tun *tunnel.Tunnel, listnenAddr string) error {
-	ln, err := net.Listen("tcp", listnenAddr)
-	if err != nil {
-		return err
-	}
+func RunListener(tun *tunnel.Tunnel, ln net.Listener) error {
 	defer ln.Close()
 
 	sm := NewStreamMap()

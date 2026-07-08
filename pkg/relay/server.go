@@ -12,18 +12,20 @@ import (
 )
 
 type Server struct {
-	mu         sync.Mutex
-	listeners  map[int]*tunnel.Tunnel
-	forwarders map[int]*tunnel.Tunnel
-	nextIndex  int
-	password   string
+	mu           sync.Mutex
+	listeners    map[int]*tunnel.Tunnel
+	forwarders   map[int]*tunnel.Tunnel
+	nextIndex    int
+	maxListeners int
+	password     string
 }
 
-func NewServer(password string) *Server {
+func NewServer(password string, maxListeners int) *Server {
 	return &Server{
-		listeners:  make(map[int]*tunnel.Tunnel),
-		forwarders: make(map[int]*tunnel.Tunnel),
-		password:   password,
+		listeners:    make(map[int]*tunnel.Tunnel),
+		forwarders:   make(map[int]*tunnel.Tunnel),
+		password:     password,
+		maxListeners: maxListeners,
 	}
 }
 
@@ -57,14 +59,30 @@ func (s *Server) HandleClient(conn net.Conn) {
 			index = s.nextIndex
 			s.nextIndex++
 		}
+		if s.maxListeners > 0 && len(s.listeners) >= s.maxListeners {
+			s.mu.Unlock()
+			t.Send(protocol.TypeError, []byte("too many listeners"))
+			return
+		}
 		s.listeners[index] = t
 	case "forwarder":
 		if wantIndex >= 0 {
 			index = wantIndex
 		} else {
-			s.mu.Unlock()
-			t.Send(protocol.TypeError, []byte("forwarder must specify index"))
-			return
+			if len(s.listeners) == 1 {
+				for i := range s.listeners {
+					index = i
+					break
+				}
+			} else if len(s.listeners) == 0 {
+				s.mu.Unlock()
+				t.Send(protocol.TypeError, []byte("no listener available yet"))
+				return
+			} else {
+				s.mu.Unlock()
+				t.Send(protocol.TypeError, []byte("forwarder must specify index when multiple listeners exist"))
+				return
+			}
 		}
 		s.forwarders[index] = t
 	}
