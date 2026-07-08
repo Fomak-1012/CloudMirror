@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"strings"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/relay"
 )
@@ -13,6 +15,7 @@ func main() {
 	port := flag.Int("p", 3862, "listening port")
 	maxListeners := flag.Int("n", 0, "max number of listeners, 0 means no limit")
 	password := flag.String("e", "", "pre-shared password")
+	certlist := flag.String("s", "", "TLS certification lists")
 	flag.Parse()
 
 	if *password == "" {
@@ -22,7 +25,29 @@ func main() {
 	srv := relay.NewServer(*password, *maxListeners)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
-	ln, err := net.Listen("tcp", addr)
+	var ln net.Listener
+	var err error
+
+	if *certlist != "" {
+		pairs := strings.Split(*certlist, ";")
+		var certs []tls.Certificate
+		for _, pair := range pairs {
+			parts := strings.SplitN(pair, ":", 2)
+			if len(parts) != 2 {
+				log.Fatalf("invalid certificate pair: %s", pair)
+			}
+			cert, err := tls.LoadX509KeyPair(parts[0], parts[1])
+			if err != nil {
+				log.Fatalf("certificate loading fails (%s): %v", pair, err)
+			}
+			certs = append(certs, cert)
+		}
+		tlsConfig := &tls.Config{Certificates: certs}
+		ln, err = tls.Listen("tcp", addr, tlsConfig)
+	} else {
+		ln, err = net.Listen("tcp", addr)
+	}
+
 	if err != nil {
 		log.Fatalf("listening fails: %v", err)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -48,6 +49,7 @@ func main() {
 	wantIndex := flag.Int("i", -1, "expected index (-1 means auto-assignment)")
 	tcpOnly := flag.Bool("t", false, "only tcp")
 	udpOnly := flag.Bool("u", false, "only udp")
+	tlsInsecure := flag.Bool("tls-insecure", false, "step tls")
 	flag.Parse()
 	log.Printf("DEBUG: forwardPort = %d", *forwardPort)
 
@@ -69,7 +71,20 @@ func main() {
 	}
 
 	serverAddr := net.JoinHostPort(*serverIp, strconv.Itoa(*serverPort))
-	conn, err := net.Dial("tcp", serverAddr)
+
+	var conn net.Conn
+	var err error
+
+	if *tlsInsecure || *serverIp != "" {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: *tlsInsecure,
+			ServerName:         *serverIp,
+		}
+		conn, err = tls.Dial("tcp", serverAddr, tlsConfig)
+	} else {
+		conn, err = net.Dial("tcp", serverAddr)
+	}
+
 	if err != nil {
 		log.Fatalf("connection failed: %v", err)
 	}
