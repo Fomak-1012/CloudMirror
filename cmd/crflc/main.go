@@ -75,9 +75,9 @@ func main() {
 	var conn net.Conn
 	var err error
 
-	if *tlsInsecure || *serverIp != "" {
+	if *tlsInsecure {
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: *tlsInsecure,
+			InsecureSkipVerify: true,
 			ServerName:         *serverIp,
 		}
 		conn, err = tls.Dial("tcp", serverAddr, tlsConfig)
