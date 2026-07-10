@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"net"
+	"time"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
 )
@@ -28,4 +29,12 @@ func (t *Tunnel) Close() error {
 
 func (t *Tunnel) RemoteAddr() net.Addr {
 	return t.conn.RemoteAddr()
+}
+
+func (t *Tunnel) SetReadDeadline(tm time.Time) error {
+	return t.conn.SetDeadline(tm)
+}
+
+func (t *Tunnel) SetWriteDeadline(tm time.Time) error {
+	return t.conn.SetWriteDeadline(tm)
 }
