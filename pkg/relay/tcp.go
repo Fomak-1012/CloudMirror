@@ -36,14 +36,27 @@ func handleServerFrames(tun *tunnel.Tunnel, sm *StreamMap) {
 	}
 }
 
-func uint16ToBytes(val uint16) []byte {
-	b := make([]byte, 2)
-	b[0] = byte(val >> 8)
-	b[1] = byte(val)
-	return b
+func tcpReadLoop(tun *tunnel.Tunnel, sid uint16, conn net.Conn, sm *StreamMap) {
+	defer conn.Close()
+	defer tun.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
+	defer sm.Remove(sid)
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		payload := make([]byte, 2+n)
+		binary.BigEndian.PutUint16(payload[:2], sid)
+		copy(payload[2:], buf[:n])
+		if err := tun.Send(protocol.TypeDataTCP, payload); err != nil {
+			return
+		}
+	}
 }
 
-func RunListener(tun *tunnel.Tunnel, ln net.Listener) error {
+func RunTCPListener(tun *tunnel.Tunnel, ln net.Listener) error {
 	defer ln.Close()
 
 	sm := NewStreamMap()
@@ -83,27 +96,7 @@ func RunListener(tun *tunnel.Tunnel, ln net.Listener) error {
 	}
 }
 
-func forwardReadLoop(tun *tunnel.Tunnel, sid uint16, conn net.Conn, sm *StreamMap) {
-	defer conn.Close()
-	defer tun.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
-	defer sm.Remove(sid)
-
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			return
-		}
-		payload := make([]byte, 2+n)
-		binary.BigEndian.PutUint16(payload[:2], sid)
-		copy(payload[2:], buf[:n])
-		if err := tun.Send(protocol.TypeDataTCP, payload); err != nil {
-			return
-		}
-	}
-}
-
-func RunForwarder(tun *tunnel.Tunnel, targetAddr string) error {
+func RunTCPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 	sm := NewStreamMap()
 
 	for {
@@ -123,7 +116,7 @@ func RunForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 				continue
 			}
 			sm.AddWithId(conn, sid)
-			go forwardReadLoop(tun, sid, conn, sm)
+			go tcpReadLoop(tun, sid, conn, sm)
 		case protocol.TypeDataTCP:
 			if len(frame.Payload) < 2 {
 				continue

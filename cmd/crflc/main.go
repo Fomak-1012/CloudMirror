@@ -121,15 +121,35 @@ func main() {
 			log.Fatalf("parsing the listening port fails: %v", err)
 		}
 		addr := fmt.Sprintf(":%d", port)
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			log.Fatalf("listening fails: %v", err)
+
+		if *udpOnly {
+			log.Printf("UDP listener running, listen %s", addr)
+			if err := relay.RunUDPListener(tun, addr); err != nil {
+				log.Fatalf("UDP listener failed: %v", err)
+			}
+		} else {
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				log.Fatalf("TCP listening fails: %v", err)
+			}
+			log.Printf("TCP listener running, listen %s", addr)
+			if err := relay.RunTCPListener(tun, ln); err != nil {
+				log.Fatalf("TCP listener failed: %v", err)
+			}
 		}
-		log.Printf("listeners running, listen %s", addr)
-		relay.RunListener(tun, ln)
+
 	case "forwarder":
 		targetAddr := fmt.Sprintf("127.0.0.1:%d", *forwardPort)
-		log.Printf("forwarder running, forward to %s", targetAddr)
-		relay.RunForwarder(tun, targetAddr)
+		if *udpOnly {
+			log.Printf("UDP forwarder running, forward to %s", targetAddr)
+			if err := relay.RunUDPForwarder(tun, targetAddr); err != nil {
+				log.Fatalf("UDP forwarder failed: %v", err)
+			}
+		} else {
+			log.Printf("TCP forwarder running, forward to %s", targetAddr)
+			if err := relay.RunTCPForwarder(tun, targetAddr); err != nil {
+				log.Fatalf("TCP forwarder failed: %v", err)
+			}
+		}
 	}
 }
