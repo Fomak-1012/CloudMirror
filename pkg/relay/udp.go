@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/binary"
+	"log"
 	"net"
 	"sync"
 
@@ -38,6 +39,7 @@ func RunUDPListener(tun *tunnel.Tunnel, listenAddr string) error {
 	if err != nil {
 		return err
 	}
+
 	defer conn.Close()
 
 	clients := make(map[uint16]*net.UDPAddr)
@@ -48,6 +50,7 @@ func RunUDPListener(tun *tunnel.Tunnel, listenAddr string) error {
 		for {
 			frame, err := tun.Receive()
 			if err != nil {
+				log.Printf("[UDP Listener] tunnel receive error: %v", err)
 				return
 			}
 			switch frame.Type {
@@ -61,7 +64,11 @@ func RunUDPListener(tun *tunnel.Tunnel, listenAddr string) error {
 				addr, ok := clients[sid]
 				mu.Unlock()
 				if ok {
-					conn.WriteToUDP(data, addr)
+					if _, err := conn.WriteToUDP(data, addr); err != nil {
+						log.Printf("[UDP Listener] write to client error (sid=%d): %v", sid, err)
+					} else {
+						log.Printf("[UDP Listener] received DATA_UDP for unknown sid=%d", sid)
+					}
 				}
 			case protocol.TypePeerLeave:
 				if len(frame.Payload) >= 2 {
@@ -69,6 +76,7 @@ func RunUDPListener(tun *tunnel.Tunnel, listenAddr string) error {
 					mu.Lock()
 					delete(clients, sid)
 					mu.Unlock()
+					log.Printf("[UDP Listener] peer leave sid=%d", sid)
 				}
 			}
 		}
@@ -78,6 +86,7 @@ func RunUDPListener(tun *tunnel.Tunnel, listenAddr string) error {
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			log.Printf("[UDP Listener] read from UDP error: %v", err)
 			return err
 		}
 
@@ -99,13 +108,20 @@ func RunUDPListener(tun *tunnel.Tunnel, listenAddr string) error {
 		mu.Unlock()
 
 		if !found {
-			tun.Send(protocol.TypePeerJoin, uint16ToBytes(sid))
+			if err := tun.Send(protocol.TypePeerJoin, uint16ToBytes(sid)); err != nil {
+				log.Printf("[UDP Listener] send PEER_JOIN error: %v", err)
+				continue
+			}
+			log.Printf("[UDP Listener] new client sid=%d from %s", sid, remoteAddr)
 		}
 
 		payload := make([]byte, 2+n)
 		binary.BigEndian.PutUint16(payload[:2], sid)
 		copy(payload[2:], buf[:n])
-		tun.Send(protocol.TypeDataUDP, payload)
+		if err := tun.Send(protocol.TypeDataUDP, payload); err != nil {
+			log.Printf("[UDP Listener] send DATA_UDP error: %v", err)
+			continue
+		}
 	}
 }
 
@@ -119,6 +135,7 @@ func RunUDPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 	for {
 		frame, err := tun.Receive()
 		if err != nil {
+			log.Printf("[UDP Forwarder] tunnel receive error: %v", err)
 			return err
 		}
 
@@ -127,10 +144,12 @@ func RunUDPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 			sid := binary.BigEndian.Uint16(frame.Payload)
 			conn, err := net.DialUDP("udp", nil, raddr)
 			if err != nil {
+				log.Printf("[UDP Forwarder] dial UDP error (sid=%d): %v", sid, err)
 				tun.Send(protocol.TypePeerLeave, frame.Payload)
 				continue
 			}
 			sm.AddWithId(conn, sid)
+			log.Printf("[UDP Forwarder] new stream sid=%d connected to %s", sid, targetAddr)
 			go udpReadLoop(tun, sid, conn, sm)
 		case protocol.TypeDataUDP:
 			if len(frame.Payload) < 2 {
@@ -139,7 +158,11 @@ func RunUDPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 			sid := binary.BigEndian.Uint16(frame.Payload[:2])
 			data := frame.Payload[2:]
 			if c := sm.Get(sid); c != nil {
-				c.Write(data)
+				if _, err := c.Write(data); err != nil {
+					log.Printf("[UDP Forwarder] write to target error (sid=%d): %v", sid, err)
+				} else {
+					log.Printf("[UDP Forwarder] DATA_UDP for unknown sid=%d", sid)
+				}
 			}
 		case protocol.TypePeerLeave:
 			if len(frame.Payload) >= 2 {
@@ -147,6 +170,7 @@ func RunUDPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 				if c := sm.Get(sid); c != nil {
 					c.Close()
 					sm.Remove(sid)
+					log.Printf("[UDP Forwarder] peer leave sid=%d", sid)
 				}
 			}
 		}
