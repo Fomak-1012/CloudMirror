@@ -2,18 +2,17 @@ package relay
 
 import (
 	"encoding/binary"
+	"fmt"
+	"log"
 	"net"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
-	"github.com/Fomak-1012/CloudMirror/pkg/tunnel"
+	"github.com/Fomak-1012/CloudMirror/pkg/session"
 )
 
-func handleServerFrames(tun *tunnel.Tunnel, sm *StreamMap) {
-	for {
-		frame, err := tun.Receive()
-		if err != nil {
-			return
-		}
+func handleServerFrames(sess *session.Session, sm *StreamMap) {
+	for frame := range sess.FrameCh() {
+		log.Printf("[tcp-handleServerFrames] got frame type=0x%x", frame.Type)
 		switch frame.Type {
 		case protocol.TypeDataTCP:
 			if len(frame.Payload) < 2 {
@@ -36,9 +35,9 @@ func handleServerFrames(tun *tunnel.Tunnel, sm *StreamMap) {
 	}
 }
 
-func tcpReadLoop(tun *tunnel.Tunnel, sid uint16, conn net.Conn, sm *StreamMap) {
+func tcpReadLoop(sess *session.Session, sid uint16, conn net.Conn, sm *StreamMap) {
 	defer conn.Close()
-	defer tun.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
+	defer sess.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
 	defer sm.Remove(sid)
 
 	buf := make([]byte, 32*1024)
@@ -50,30 +49,36 @@ func tcpReadLoop(tun *tunnel.Tunnel, sid uint16, conn net.Conn, sm *StreamMap) {
 		payload := make([]byte, 2+n)
 		binary.BigEndian.PutUint16(payload[:2], sid)
 		copy(payload[2:], buf[:n])
-		if err := tun.Send(protocol.TypeDataTCP, payload); err != nil {
+		if err := sess.Send(protocol.TypeDataTCP, payload); err != nil {
 			return
 		}
 	}
 }
 
-func RunTCPListener(tun *tunnel.Tunnel, ln net.Listener) error {
+func RunTCPListener(sess *session.Session, ln net.Listener) error {
 	defer ln.Close()
 
 	sm := NewStreamMap()
 
-	go handleServerFrames(tun, sm)
+	go handleServerFrames(sess, sm)
+
+	go func() {
+		<-sess.Done()
+		log.Printf("[tcp-listener] session done, closing listener")
+		ln.Close()
+	}()
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return err
+			return fmt.Errorf("listener closed: %v", err)
 		}
 		sid := sm.Add(conn)
-		tun.Send(protocol.TypePeerJoin, uint16ToBytes(sid))
+		sess.Send(protocol.TypePeerJoin, uint16ToBytes(sid))
 
 		go func(sid uint16, conn net.Conn) {
 			defer conn.Close()
-			defer tun.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
+			defer sess.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
 			defer sm.Remove(sid)
 
 			buf := make([]byte, 32*1024)
@@ -88,7 +93,7 @@ func RunTCPListener(tun *tunnel.Tunnel, ln net.Listener) error {
 
 				binary.BigEndian.PutUint16(payload[:2], sid)
 				copy(payload[2:], buf[:n])
-				if err := tun.Send(protocol.TypeDataTCP, payload); err != nil {
+				if err := sess.Send(protocol.TypeDataTCP, payload); err != nil {
 					return
 				}
 			}
@@ -96,14 +101,10 @@ func RunTCPListener(tun *tunnel.Tunnel, ln net.Listener) error {
 	}
 }
 
-func RunTCPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
+func RunTCPForwarder(sess *session.Session, targetAddr string) error {
 	sm := NewStreamMap()
 
-	for {
-		frame, err := tun.Receive()
-		if err != nil {
-			return err
-		}
+	for frame := range sess.FrameCh() {
 		switch frame.Type {
 		case protocol.TypePeerJoin:
 			if len(frame.Payload) < 2 {
@@ -112,11 +113,11 @@ func RunTCPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 			sid := binary.BigEndian.Uint16(frame.Payload)
 			conn, err := net.Dial("tcp", targetAddr)
 			if err != nil {
-				tun.Send(protocol.TypePeerLeave, frame.Payload)
+				sess.Send(protocol.TypePeerLeave, frame.Payload)
 				continue
 			}
 			sm.AddWithId(conn, sid)
-			go tcpReadLoop(tun, sid, conn, sm)
+			go tcpReadLoop(sess, sid, conn, sm)
 		case protocol.TypeDataTCP:
 			if len(frame.Payload) < 2 {
 				continue
@@ -136,4 +137,5 @@ func RunTCPForwarder(tun *tunnel.Tunnel, targetAddr string) error {
 			}
 		}
 	}
+	return fmt.Errorf("session closed")
 }

@@ -5,29 +5,16 @@ import (
 	"time"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
-	"github.com/Fomak-1012/CloudMirror/pkg/tunnel"
+	"github.com/Fomak-1012/CloudMirror/pkg/session"
 )
 
-func StartKeepAlive(tun *tunnel.Tunnel, interval, timeout time.Duration, onTimeout func()) {
+func StartKeepAlive(sess *session.Session, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-
-		go func() {
-			for range ticker.C {
-				if err := tun.Send(protocol.TypeKeepalive, nil); err != nil {
-					log.Printf("[KeepAlive] send keepalive error: %v", err)
-					return
-				}
-			}
-		}()
-
-		for {
-			tun.SetReadDeadline(time.Now().Add(timeout))
-			_, err := tun.Receive()
-			if err != nil {
-				log.Printf("[KeepAlive] receive error (timeout or conn closed): %v err")
-				onTimeout()
+		for range ticker.C {
+			if err := sess.Send(protocol.TypeKeepalive, nil); err != nil {
+				log.Printf("[keepalive] send error: %v", err)
 				return
 			}
 		}

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Fomak-1012/CloudMirror/pkg/auth"
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
+	"github.com/Fomak-1012/CloudMirror/pkg/session"
 	"github.com/Fomak-1012/CloudMirror/pkg/tunnel"
 )
 
@@ -33,11 +33,13 @@ func RunClient(host string, port int, password string, forwardPort int,
 	backoff := 1 * time.Second
 	maxBackoff := 30 * time.Second
 
+	actualIndex := wantIndex
 	for {
-		err := runOnce(serverAddr, host, password, role, forwardPort, listenSpec, wantIndex, udpOnly, tlsInsecure)
+		assignedIndex, err := runOnce(serverAddr, host, password, role, forwardPort, listenSpec, actualIndex, udpOnly, tlsInsecure)
 		if err == nil {
 			return nil // normal exit (not implemented yet)
 		}
+		actualIndex = assignedIndex // remember index for reconnect to avoid port drift
 		log.Printf("client disconnected: %v, reconnecting in %v...", err, backoff)
 		time.Sleep(backoff)
 		backoff *= 2
@@ -47,10 +49,14 @@ func RunClient(host string, port int, password string, forwardPort int,
 	}
 }
 
-func runOnce(serverAddr string, host string, password string, role string, forwardPort int,
-	listenSpec string, wantIndex int, udpOnly bool, tlsInsecure bool) error {
+// runOnce executes one complete client lifecycle: connect, authenticate,
+// register, and start the role‑specific forwarding loop.
+// It returns the assigned index and an error. The caller should reuse the
+// assigned index on reconnection to avoid port drift.
+func runOnce(serverAddr, host, password, role string, forwardPort int,
+	listenSpec string, wantIndex int, udpOnly, tlsInsecure bool) (int, error) {
 
-	// Dial server.
+	// 1. Establish TCP / TLS connection
 	var conn net.Conn
 	var err error
 	if tlsInsecure {
@@ -63,76 +69,100 @@ func runOnce(serverAddr string, host string, password string, role string, forwa
 		conn, err = net.Dial("tcp", serverAddr)
 	}
 	if err != nil {
-		return fmt.Errorf("dial error: %v", err)
+		return 0, fmt.Errorf("dial error: %v", err)
 	}
 
+	// 2. Wrap the raw connection into a Tunnel, then a Session.
+	//    The Session starts a dedicated read‑pump goroutine.
 	tun := tunnel.NewTunnel(conn)
-	defer tun.Close()
+	sess := session.NewSession(tun, 90*time.Second) // idle timeout
+	defer sess.Close()
 
-	// Start keepalive – close tunnel on timeout.
-	StartKeepAlive(tun, 30*time.Second, 90*time.Second, func() {
-		tun.Close()
-	})
+	// 3. Start periodic keep‑alive frames (send only, no reads).
+	StartKeepAlive(sess, 30*time.Second)
 
-	// Authenticate.
-	if err := auth.ClientAuth(tun, password); err != nil {
-		return fmt.Errorf("auth failed: %v", err)
+	// 4. Authenticate (inline, avoids modifying the auth package for now)
+	if err := sess.Send(protocol.TypeAuth, []byte(password)); err != nil {
+		return wantIndex, fmt.Errorf("auth send error: %v", err)
+	}
+	if _, err := waitForFrame(sess, protocol.TypeAuthOK, 10*time.Second); err != nil {
+		return wantIndex, fmt.Errorf("auth failed: %v", err)
 	}
 	log.Println("auth pass")
 
-	// Register role.
+	// 5. Register the role
 	regPayload := role
 	if wantIndex >= 0 {
 		regPayload = fmt.Sprintf("%s,%d", role, wantIndex)
 	}
-	if err := tun.Send(protocol.TypeRegister, []byte(regPayload)); err != nil {
-		return fmt.Errorf("register send error: %v", err)
+	if err := sess.Send(protocol.TypeRegister, []byte(regPayload)); err != nil {
+		return wantIndex, fmt.Errorf("register send error: %v", err)
 	}
 
-	frame, err := tun.Receive()
+	regFrame, err := waitForFrame(sess, protocol.TypeRegOK, 10*time.Second)
 	if err != nil {
-		return fmt.Errorf("register receive error: %v", err)
+		return wantIndex, fmt.Errorf("registration error: %v", err)
 	}
-	if frame.Type != protocol.TypeRegOK {
-		return fmt.Errorf("registration rejected: %s", string(frame.Payload))
-	}
-
-	assignedIndex, _ := strconv.Atoi(string(frame.Payload))
+	assignedIndex, _ := strconv.Atoi(string(regFrame.Payload))
 	log.Printf("sign pass, assigned index = %d", assignedIndex)
 
-	// Start forwarding.
+	// 6. Start the role‑specific forwarding loop.
+	//    Each function (RunTCPListener, RunUDPListener, RunTCPForwarder,
+	//    RunUDPForwarder) receives the session and reads frames exclusively
+	//    from sess.FrameCh().
 	switch role {
 	case "listener":
 		port, err := resolvePort(listenSpec, assignedIndex)
 		if err != nil {
-			return fmt.Errorf("resolve port: %v", err)
+			return assignedIndex, fmt.Errorf("resolve port: %v", err)
 		}
 		addr := fmt.Sprintf(":%d", port)
 
 		if udpOnly {
 			log.Printf("UDP listener running, listen %s", addr)
-			return RunUDPListener(tun, addr)
-		} else {
-			ln, err := net.Listen("tcp", addr)
-			if err != nil {
-				return fmt.Errorf("tcp listen: %v", err)
-			}
-			defer ln.Close()
-			log.Printf("TCP listener running, listen %s", addr)
-			return RunTCPListener(tun, ln)
+			return assignedIndex, RunUDPListener(sess, addr)
 		}
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return assignedIndex, fmt.Errorf("tcp listen: %v", err)
+		}
+		defer ln.Close()
+		log.Printf("TCP listener running, listen %s", addr)
+		return assignedIndex, RunTCPListener(sess, ln)
 
 	case "forwarder":
 		targetAddr := fmt.Sprintf("127.0.0.1:%d", forwardPort)
 		if udpOnly {
 			log.Printf("UDP forwarder running, forward to %s", targetAddr)
-			return RunUDPForwarder(tun, targetAddr)
-		} else {
-			log.Printf("TCP forwarder running, forward to %s", targetAddr)
-			return RunTCPForwarder(tun, targetAddr)
+			return assignedIndex, RunUDPForwarder(sess, targetAddr)
+		}
+		log.Printf("TCP forwarder running, forward to %s", targetAddr)
+		return assignedIndex, RunTCPForwarder(sess, targetAddr)
+	}
+	return assignedIndex, nil
+}
+
+// waitForFrame reads from the session's frame channel and returns the first
+// frame matching the expected type. Any other frame type is silently dropped.
+// It returns an error if the session closes or the timeout is exceeded.
+func waitForFrame(sess *session.Session, typ byte, timeout time.Duration) (*protocol.Frame, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case frame, ok := <-sess.FrameCh():
+			if !ok {
+				return nil, fmt.Errorf("session closed")
+			}
+			if frame.Type == typ {
+				return frame, nil
+			}
+			// For now, ignore unexpected frame types (e.g. keepalive).
+		case <-timer.C:
+			return nil, fmt.Errorf("timeout waiting for frame 0x%x", typ)
 		}
 	}
-	return nil
 }
 
 // resolvePort calculates the actual listening port based on the spec and assigned index.
