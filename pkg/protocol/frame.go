@@ -11,6 +11,7 @@ const (
 	TypePeerLeave byte = 0x08
 	TypeError     byte = 0x09
 	TypeKeepalive byte = 0x0A
+	TypeDataTUN   byte = 0x0B
 )
 
 type Frame struct {

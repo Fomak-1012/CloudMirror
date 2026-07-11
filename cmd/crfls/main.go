@@ -16,6 +16,7 @@ func main() {
 	maxListeners := flag.Int("n", 0, "max number of listeners, 0 means no limit")
 	password := flag.String("e", "", "pre-shared password")
 	certlist := flag.String("s", "", "TLS certification lists")
+	tunMode := flag.Bool("t", false, "enable TUN device mode")
 	flag.Parse()
 
 	if *password == "" {
@@ -23,6 +24,12 @@ func main() {
 	}
 
 	srv := relay.NewServer(*password, *maxListeners)
+
+	if *tunMode {
+		if err := srv.StartTUNMode(); err != nil {
+			log.Fatalf("TUN mode init failed: %v", err)
+		}
+	}
 
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
 	var ln net.Listener

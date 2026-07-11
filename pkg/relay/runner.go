@@ -18,9 +18,16 @@ import (
 func RunClient(host string, port int, password string, forwardPort int,
 	listenSpec string, wantIndex int, udpOnly bool, tlsInsecure bool) error {
 
-	// Determine role.
+	// Determine role and detect TUN mode.
 	role := ""
-	if forwardPort > 0 && listenSpec == "" {
+	isTUN := strings.Contains(listenSpec, "/") // CIDR like 192.168.1.0/24 → TUN mode
+
+	if isTUN {
+		if forwardPort > 0 {
+			return fmt.Errorf("TUN mode (-l with CIDR) cannot be used with -f")
+		}
+		role = "listener"
+	} else if forwardPort > 0 && listenSpec == "" {
 		role = "forwarder"
 	} else if listenSpec != "" && forwardPort == 0 {
 		role = "listener"
@@ -35,7 +42,7 @@ func RunClient(host string, port int, password string, forwardPort int,
 
 	actualIndex := wantIndex
 	for {
-		assignedIndex, err := runOnce(serverAddr, host, password, role, forwardPort, listenSpec, actualIndex, udpOnly, tlsInsecure)
+		assignedIndex, err := runOnce(serverAddr, host, password, role, forwardPort, listenSpec, actualIndex, udpOnly, tlsInsecure, isTUN)
 		if err == nil {
 			return nil // normal exit (not implemented yet)
 		}
@@ -54,7 +61,7 @@ func RunClient(host string, port int, password string, forwardPort int,
 // It returns the assigned index and an error. The caller should reuse the
 // assigned index on reconnection to avoid port drift.
 func runOnce(serverAddr, host, password, role string, forwardPort int,
-	listenSpec string, wantIndex int, udpOnly, tlsInsecure bool) (int, error) {
+	listenSpec string, wantIndex int, udpOnly, tlsInsecure, isTUN bool) (int, error) {
 
 	// 1. Establish TCP / TLS connection
 	var conn net.Conn
@@ -91,10 +98,16 @@ func runOnce(serverAddr, host, password, role string, forwardPort int,
 	log.Println("auth pass")
 
 	// 5. Register the role
-	regPayload := role
-	if wantIndex >= 0 {
-		regPayload = fmt.Sprintf("%s,%d", role, wantIndex)
+	var regPayload string
+	if isTUN {
+		regPayload, _ = configureTUNClient(listenSpec, wantIndex)
+	} else {
+		regPayload = role
+		if wantIndex >= 0 {
+			regPayload = fmt.Sprintf("%s,%d", role, wantIndex)
+		}
 	}
+
 	if err := sess.Send(protocol.TypeRegister, []byte(regPayload)); err != nil {
 		return wantIndex, fmt.Errorf("register send error: %v", err)
 	}
@@ -103,15 +116,33 @@ func runOnce(serverAddr, host, password, role string, forwardPort int,
 	if err != nil {
 		return wantIndex, fmt.Errorf("registration error: %v", err)
 	}
-	assignedIndex, _ := strconv.Atoi(string(regFrame.Payload))
+
+	// Parse the registration reply.
+	// Normal mode:  "<index>"
+	// TUN mode:     "<index>,<assigned_ip>"
+	regReply := string(regFrame.Payload)
+	assignedIndex := 0
+	var assignedIP string
+	if isTUN {
+		replyParts := strings.SplitN(regReply, ",", 2)
+		assignedIndex, _ = strconv.Atoi(replyParts[0])
+		if len(replyParts) > 1 {
+			assignedIP = replyParts[1]
+		}
+	} else {
+		assignedIndex, _ = strconv.Atoi(regReply)
+	}
 	log.Printf("sign pass, assigned index = %d", assignedIndex)
 
 	// 6. Start the role‑specific forwarding loop.
-	//    Each function (RunTCPListener, RunUDPListener, RunTCPForwarder,
-	//    RunUDPForwarder) receives the session and reads frames exclusively
-	//    from sess.FrameCh().
 	switch role {
 	case "listener":
+		if isTUN {
+			cidr := listenSpec
+			log.Printf("TUN listener running, IP=%s, CIDR=%s", assignedIP, cidr)
+			return assignedIndex, runTUNListener(sess, cidr, assignedIndex, assignedIP)
+		}
+
 		port, err := resolvePort(listenSpec, assignedIndex)
 		if err != nil {
 			return assignedIndex, fmt.Errorf("resolve port: %v", err)
