@@ -10,7 +10,6 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
 	"github.com/Fomak-1012/CloudMirror/pkg/session"
 	"github.com/Fomak-1012/CloudMirror/pkg/tun"
-	"github.com/Fomak-1012/CloudMirror/pkg/tunnel"
 )
 
 // ServerTUNContext holds the server-side TUN state shared across all TUN clients.
@@ -19,7 +18,7 @@ type ServerTUNContext struct {
 	dev       *tun.Dev
 	pool      *tun.Pool
 	cidrStr   string              // CIDR string from the first TUN client
-	ipToTun   map[string]*tunnel.Tunnel // dest IP → client tunnel
+	ipToTun   map[string]protocol.FrameReadWriter // dest IP → client tunnel
 	indexToIP map[int]string       // index → assigned IP
 }
 
@@ -32,7 +31,7 @@ func NewServerTUNContext() (*ServerTUNContext, error) {
 
 	ctx := &ServerTUNContext{
 		dev:       dev,
-		ipToTun:   make(map[string]*tunnel.Tunnel),
+		ipToTun:   make(map[string]protocol.FrameReadWriter),
 		indexToIP: make(map[int]string),
 	}
 
@@ -103,21 +102,21 @@ func (ctx *ServerTUNContext) ensurePool(cidr string) error {
 	mask := pool.MaskSize()
 	addr := fmt.Sprintf("%s/%d", gw.String(), mask)
 
-	if err := exec.Command("ip", "addr", "add", addr, "dev", ctx.dev.Name).Run(); err != nil {
-		return fmt.Errorf("ip addr add %s dev %s: %w", addr, ctx.dev.Name, err)
+	if err := exec.Command("ip", "addr", "add", addr, "dev", ctx.dev.Name()).Run(); err != nil {
+		return fmt.Errorf("ip addr add %s dev %s: %w", addr, ctx.dev.Name(), err)
 	}
-	if err := exec.Command("ip", "link", "set", ctx.dev.Name, "up").Run(); err != nil {
-		return fmt.Errorf("ip link set %s up: %w", ctx.dev.Name, err)
+	if err := exec.Command("ip", "link", "set", ctx.dev.Name(), "up").Run(); err != nil {
+		return fmt.Errorf("ip link set %s up: %w", ctx.dev.Name(), err)
 	}
 
 	log.Printf("[server-tun] device %s up with %s, capacity=%d clients, cidr=%s",
-		ctx.dev.Name, addr, pool.Capacity(), cidr)
+		ctx.dev.Name(), addr, pool.Capacity(), cidr)
 	return nil
 }
 
 // RegisterClient assigns an IP to a TUN client and records the tunnel mapping.
 // Returns the assigned IP string.
-func (ctx *ServerTUNContext) RegisterClient(t *tunnel.Tunnel, index int, cidr string) (string, error) {
+func (ctx *ServerTUNContext) RegisterClient(conn protocol.FrameReadWriter, index int, cidr string) (string, error) {
 	if err := ctx.ensurePool(cidr); err != nil {
 		return "", err
 	}
@@ -140,7 +139,7 @@ func (ctx *ServerTUNContext) RegisterClient(t *tunnel.Tunnel, index int, cidr st
 		delete(ctx.ipToTun, oldIP)
 	}
 
-	ctx.ipToTun[ipStr] = t
+	ctx.ipToTun[ipStr] = conn
 	ctx.indexToIP[index] = ipStr
 
 	log.Printf("[server-tun] client index=%d assigned IP=%s", index, ipStr)
@@ -167,7 +166,7 @@ func (ctx *ServerTUNContext) WriteToTUN(packet []byte) error {
 
 // DevName returns the TUN device name.
 func (ctx *ServerTUNContext) DevName() string {
-	return ctx.dev.Name
+	return ctx.dev.Name()
 }
 
 // Close shuts down the TUN context and releases the device.
@@ -177,9 +176,9 @@ func (ctx *ServerTUNContext) Close() error {
 
 // serverTUNRelayLoop handles the relay loop for a TUN-mode listener.
 // It reads TypeDataTUN frames from the client and writes them to the server TUN device.
-func serverTUNRelayLoop(t *tunnel.Tunnel, ctx *ServerTUNContext, index int) {
+func serverTUNRelayLoop(conn protocol.FrameReadWriter, ctx *ServerTUNContext, index int) {
 	for {
-		frame, err := t.Receive()
+		frame, err := conn.Receive()
 		if err != nil {
 			log.Printf("[server-tun] relayLoop index=%d recv error: %v", index, err)
 			break
@@ -224,14 +223,14 @@ func runTUNListener(sess *session.Session, cidr string, index int, assignedIP st
 		addr = fmt.Sprintf("%s/%d", assignedIP, ones)
 	}
 
-	if err := exec.Command("ip", "addr", "add", addr, "dev", dev.Name).Run(); err != nil {
-		return fmt.Errorf("ip addr add %s dev %s: %w", addr, dev.Name, err)
+	if err := exec.Command("ip", "addr", "add", addr, "dev", dev.Name()).Run(); err != nil {
+		return fmt.Errorf("ip addr add %s dev %s: %w", addr, dev.Name(), err)
 	}
-	if err := exec.Command("ip", "link", "set", dev.Name, "up").Run(); err != nil {
-		return fmt.Errorf("ip link set %s up: %w", dev.Name, err)
+	if err := exec.Command("ip", "link", "set", dev.Name(), "up").Run(); err != nil {
+		return fmt.Errorf("ip link set %s up: %w", dev.Name(), err)
 	}
 
-	log.Printf("[tun-listener] local TUN %s up with %s", dev.Name, addr)
+	log.Printf("[tun-listener] local TUN %s up with %s", dev.Name(), addr)
 
 	// Goroutine: local TUN → session
 	go func() {

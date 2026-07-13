@@ -16,8 +16,11 @@ const (
 // Dev is a TUN device that can read and write raw IP packets.
 type Dev struct {
 	file *os.File
-	Name string
+	name string
 }
+
+// Name returns the kernel-assigned device name.
+func (d *Dev) Name() string { return d.name }
 
 // New creates a TUN device with the given name.
 // On Linux this opens /dev/net/tun and configures it via ioctl.
@@ -49,7 +52,7 @@ func New(name string) (*Dev, error) {
 
 	return &Dev{
 		file: os.NewFile(uintptr(fd), "/dev/net/tun"),
-		Name: devName,
+		name: devName,
 	}, nil
 }
 
