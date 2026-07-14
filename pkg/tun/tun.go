@@ -1,3 +1,5 @@
+// Package tun 提供 Linux TUN 虚拟网卡的创建和读写能力。
+// TUN 设备工作在 IP 层（OSI 第 3 层），读写的是原始 IP 数据报。
 package tun
 
 import (
@@ -8,40 +10,41 @@ import (
 )
 
 const (
-	cIFF_TUN   = 0x0001
-	cIFF_NO_PI = 0x1000
-	cTUNSETIFF = 0x400454ca
+	cIFF_TUN   = 0x0001 // TUN 设备标志
+	cIFF_NO_PI = 0x1000 // 不附加 4 字节的协议信息头
+	cTUNSETIFF = 0x400454ca // TUNSETIFF ioctl 命令
 )
 
-// Dev is a TUN device that can read and write raw IP packets.
+// Dev 表示一个 TUN 虚拟网卡设备，可读写原始 IP 包。
 type Dev struct {
-	file *os.File
-	name string
+	file *os.File // /dev/net/tun 的文件描述符
+	name string   // 内核分配的设备名（如 crfl0）
 }
 
-// Name returns the kernel-assigned device name.
+// Name 返回内核分配的设备名称。
 func (d *Dev) Name() string { return d.name }
 
-// New creates a TUN device with the given name.
-// On Linux this opens /dev/net/tun and configures it via ioctl.
+// New 创建一个 TUN 设备。name 为请求名称，若以 %d 结尾，内核自动编号。
 func New(name string) (*Dev, error) {
 	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/net/tun: %w", err)
 	}
 
+	// 通过 ioctl TUNSETIFF 配置设备
 	var ifr [40]byte
 	copy(ifr[:syscall.IFNAMSIZ], name)
 	flags := uint16(cIFF_TUN | cIFF_NO_PI)
 	*(*uint16)(unsafe.Pointer(&ifr[syscall.IFNAMSIZ])) = flags
 
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(cTUNSETIFF), uintptr(unsafe.Pointer(&ifr)))
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd),
+		uintptr(cTUNSETIFF), uintptr(unsafe.Pointer(&ifr)))
 	if errno != 0 {
 		syscall.Close(fd)
 		return nil, fmt.Errorf("TUNSETIFF ioctl: %w", errno)
 	}
 
-	// Read back the actual device name (may differ if name was empty or truncated).
+	// 读取内核返回的实际设备名（可能因重名而不同）
 	devName := string(ifr[:syscall.IFNAMSIZ])
 	for i, b := range ifr[:syscall.IFNAMSIZ] {
 		if b == 0 {
@@ -56,22 +59,11 @@ func New(name string) (*Dev, error) {
 	}, nil
 }
 
-// Read reads a raw IP packet from the TUN device.
-func (d *Dev) Read(p []byte) (int, error) {
-	return d.file.Read(p)
-}
+// Read 从 TUN 设备读取一个原始 IP 包。
+func (d *Dev) Read(p []byte) (int, error) { return d.file.Read(p) }
 
-// Write writes a raw IP packet to the TUN device.
-func (d *Dev) Write(p []byte) (int, error) {
-	return d.file.Write(p)
-}
+// Write 向 TUN 设备写入一个原始 IP 包。
+func (d *Dev) Write(p []byte) (int, error) { return d.file.Write(p) }
 
-// Close closes the TUN device.
-func (d *Dev) Close() error {
-	return d.file.Close()
-}
-
-// File returns the underlying os.File for use in select/poll.
-func (d *Dev) File() *os.File {
-	return d.file
-}
+// Close 关闭 TUN 设备（注意：不会自动删除网络接口）。
+func (d *Dev) Close() error { return d.file.Close() }

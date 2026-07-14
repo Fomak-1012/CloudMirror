@@ -10,6 +10,8 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/session"
 )
 
+// handleServerFrames 在 listener 端运行，处理来自 forwarder 的帧。
+// 根据帧类型分发：DataTCP 写入对应流连接，PeerLeave 关闭并清理流。
 func handleServerFrames(sess *session.Session, sm *StreamMap) {
 	for frame := range sess.FrameCh() {
 		log.Printf("[tcp-handleServerFrames] got frame type=0x%x", frame.Type)
@@ -35,6 +37,8 @@ func handleServerFrames(sess *session.Session, sm *StreamMap) {
 	}
 }
 
+// tcpReadLoop 在 forwarder 端运行，从目标 TCP 连接读取数据并发送到 Session。
+// 当连接关闭时，发送 PeerLeave 通知 listener 清理对应流。
 func tcpReadLoop(sess *session.Session, sid uint16, conn net.Conn, sm *StreamMap) {
 	defer conn.Close()
 	defer sess.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
@@ -55,13 +59,17 @@ func tcpReadLoop(sess *session.Session, sid uint16, conn net.Conn, sm *StreamMap
 	}
 }
 
+// RunTCPListener 在 listener 端运行 TCP 监听循环。
+// 接受新连接 → 分配流 ID → 通知 forwarder（PeerJoin）→ 启动读写转发。
 func RunTCPListener(sess *session.Session, ln net.Listener) error {
 	defer ln.Close()
 
 	sm := NewStreamMap()
 
+	// 后台处理来自 forwarder 的帧
 	go handleServerFrames(sess, sm)
 
+	// 当 Session 结束时关闭监听器，释放端口
 	go func() {
 		<-sess.Done()
 		log.Printf("[tcp-listener] session done, closing listener")
@@ -71,7 +79,7 @@ func RunTCPListener(sess *session.Session, ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return fmt.Errorf("listener closed: %v", err)
+			return fmt.Errorf("listener closed: %w", err)
 		}
 		sid := sm.Add(conn)
 		sess.Send(protocol.TypePeerJoin, uint16ToBytes(sid))
@@ -82,15 +90,12 @@ func RunTCPListener(sess *session.Session, ln net.Listener) error {
 			defer sm.Remove(sid)
 
 			buf := make([]byte, 32*1024)
-
 			for {
 				n, err := conn.Read(buf)
 				if err != nil {
 					return
 				}
-
 				payload := make([]byte, 2+n)
-
 				binary.BigEndian.PutUint16(payload[:2], sid)
 				copy(payload[2:], buf[:n])
 				if err := sess.Send(protocol.TypeDataTCP, payload); err != nil {
@@ -101,6 +106,10 @@ func RunTCPListener(sess *session.Session, ln net.Listener) error {
 	}
 }
 
+// RunTCPForwarder 在 forwarder 端运行 TCP 转发循环。
+// 收到 PeerJoin → 连接目标地址并创建流 → 启动读循环。
+// 收到 DataTCP → 写入对应流连接。
+// 收到 PeerLeave → 关闭对应流连接。
 func RunTCPForwarder(sess *session.Session, targetAddr string) error {
 	sm := NewStreamMap()
 
@@ -116,7 +125,7 @@ func RunTCPForwarder(sess *session.Session, targetAddr string) error {
 				sess.Send(protocol.TypePeerLeave, frame.Payload)
 				continue
 			}
-			sm.AddWithId(conn, sid)
+			sm.AddWithID(conn, sid)
 			go tcpReadLoop(sess, sid, conn, sm)
 		case protocol.TypeDataTCP:
 			if len(frame.Payload) < 2 {

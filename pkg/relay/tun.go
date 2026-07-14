@@ -12,17 +12,18 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/tun"
 )
 
-// ServerTUNContext holds the server-side TUN state shared across all TUN clients.
+// ServerTUNContext 持有服务端 TUN 模式的共享状态，包括 TUN 设备、
+// IP 池和 IP → 客户端隧道的路由表。
 type ServerTUNContext struct {
 	mu        sync.Mutex
-	dev       *tun.Dev
-	pool      *tun.Pool
-	cidrStr   string              // CIDR string from the first TUN client
-	ipToTun   map[string]protocol.FrameReadWriter // dest IP → client tunnel
-	indexToIP map[int]string       // index → assigned IP
+	dev       *tun.Dev                           // 服务端 TUN 设备
+	pool      *tun.Pool                          // IP 分配池
+	cidrStr   string                             // 首个客户端注册的 CIDR
+	ipToTun   map[string]protocol.FrameReadWriter // 目标 IP → 客户端隧道
+	indexToIP map[int]string                      // index → 分配的 IP
 }
 
-// NewServerTUNContext creates a TUN device and starts the reader goroutine.
+// NewServerTUNContext 创建服务端 TUN 设备并启动后台路由 goroutine。
 func NewServerTUNContext() (*ServerTUNContext, error) {
 	dev, err := tun.New("crfl%d")
 	if err != nil {
@@ -35,14 +36,12 @@ func NewServerTUNContext() (*ServerTUNContext, error) {
 		indexToIP: make(map[int]string),
 	}
 
-	// Start the TUN reader goroutine that distributes packets to clients.
 	go ctx.tunReadLoop()
-
 	return ctx, nil
 }
 
-// tunReadLoop reads IP packets from the server's TUN device and forwards
-// each packet to the client that owns the destination IP.
+// tunReadLoop 在后台从服务端 TUN 设备读取 IP 包，根据目标 IP 路由到对应客户端。
+// 命中 ipToTun 的包直接转发，未命中的丢给内核路由（如果系统有路由规则）。
 func (ctx *ServerTUNContext) tunReadLoop() {
 	buf := make([]byte, 64*1024)
 	for {
@@ -52,13 +51,13 @@ func (ctx *ServerTUNContext) tunReadLoop() {
 			return
 		}
 		if n < 20 {
-			continue // too short for an IP header
+			continue // 太短，不是有效 IP 头
 		}
 
 		packet := make([]byte, n)
 		copy(packet, buf[:n])
 
-		// Extract destination IP from the IPv4 header (bytes 16-19).
+		// IPv4 头字节 16-19 为目标地址
 		destIP := net.IP(packet[16:20]).String()
 
 		ctx.mu.Lock()
@@ -70,19 +69,16 @@ func (ctx *ServerTUNContext) tunReadLoop() {
 				log.Printf("[server-tun] send to %s error: %v", destIP, err)
 			}
 		}
-		// Packets for unknown destinations are silently dropped
-		// (the kernel will handle routing if routes are set up).
 	}
 }
 
-// ensurePool creates the IP pool from the first TUN client's CIDR,
-// configures the TUN device, and brings it up.
+// ensurePool 确保 IP 池已初始化（首个客户端注册时）。若已存在则校验 CIDR 一致性。
+// 池初始化后会自动配置 TUN 设备的网关 IP 并启用。
 func (ctx *ServerTUNContext) ensurePool(cidr string) error {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 
 	if ctx.pool != nil {
-		// Pool already initialized — verify CIDR matches.
 		if cidr != ctx.cidrStr {
 			return fmt.Errorf("CIDR mismatch: pool is %s, got %s", ctx.cidrStr, cidr)
 		}
@@ -97,7 +93,7 @@ func (ctx *ServerTUNContext) ensurePool(cidr string) error {
 	ctx.pool = pool
 	ctx.cidrStr = cidr
 
-	// Configure the TUN device with the gateway IP and bring it up.
+	// 配置 TUN 设备 IP 并启用
 	gw := pool.GatewayIP()
 	mask := pool.MaskSize()
 	addr := fmt.Sprintf("%s/%d", gw.String(), mask)
@@ -114,8 +110,8 @@ func (ctx *ServerTUNContext) ensurePool(cidr string) error {
 	return nil
 }
 
-// RegisterClient assigns an IP to a TUN client and records the tunnel mapping.
-// Returns the assigned IP string.
+// RegisterClient 为 TUN 客户端分配 IP 并建立 IP → 隧道路由。
+// 返回分配的 IP 字符串。
 func (ctx *ServerTUNContext) RegisterClient(conn protocol.FrameReadWriter, index int, cidr string) (string, error) {
 	if err := ctx.ensurePool(cidr); err != nil {
 		return "", err
@@ -131,7 +127,7 @@ func (ctx *ServerTUNContext) RegisterClient(conn protocol.FrameReadWriter, index
 
 	ipStr := clientIP.String()
 
-	// Clean up any previous tunnel at this IP or index.
+	// 清理旧路由条目
 	if oldTun, ok := ctx.ipToTun[ipStr]; ok {
 		oldTun.Close()
 	}
@@ -146,11 +142,10 @@ func (ctx *ServerTUNContext) RegisterClient(conn protocol.FrameReadWriter, index
 	return ipStr, nil
 }
 
-// UnregisterClient removes a TUN client's mappings.
+// UnregisterClient 移除客户端的 IP 路由映射。
 func (ctx *ServerTUNContext) UnregisterClient(index int) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
-
 	if ipStr, ok := ctx.indexToIP[index]; ok {
 		delete(ctx.ipToTun, ipStr)
 		delete(ctx.indexToIP, index)
@@ -158,24 +153,20 @@ func (ctx *ServerTUNContext) UnregisterClient(index int) {
 	}
 }
 
-// WriteToTUN writes a raw IP packet to the server's TUN device.
+// WriteToTUN 将原始 IP 包写入服务端 TUN 设备。
 func (ctx *ServerTUNContext) WriteToTUN(packet []byte) error {
 	_, err := ctx.dev.Write(packet)
 	return err
 }
 
-// DevName returns the TUN device name.
-func (ctx *ServerTUNContext) DevName() string {
-	return ctx.dev.Name()
-}
+// DevName 返回服务端 TUN 设备的名称。
+func (ctx *ServerTUNContext) DevName() string { return ctx.dev.Name() }
 
-// Close shuts down the TUN context and releases the device.
-func (ctx *ServerTUNContext) Close() error {
-	return ctx.dev.Close()
-}
+// Close 关闭服务端 TUN 设备。
+func (ctx *ServerTUNContext) Close() error { return ctx.dev.Close() }
 
-// serverTUNRelayLoop handles the relay loop for a TUN-mode listener.
-// It reads TypeDataTUN frames from the client and writes them to the server TUN device.
+// serverTUNRelayLoop 在服务端为每个 TUN 客户端运行转发循环：
+// 从客户端接收 TypeDataTUN 帧 → 写入服务端 TUN 设备。
 func serverTUNRelayLoop(conn protocol.FrameReadWriter, ctx *ServerTUNContext, index int) {
 	for {
 		frame, err := conn.Receive()
@@ -189,20 +180,19 @@ func serverTUNRelayLoop(conn protocol.FrameReadWriter, ctx *ServerTUNContext, in
 				break
 			}
 		}
-		// Ignore other frame types in TUN mode.
 	}
-
 	ctx.UnregisterClient(index)
 }
 
-// --- Client-side TUN ---
+// ---- 客户端 TUN ----
 
-// runTUNListener creates a local TUN device, configures it with the assigned IP,
-// and starts forwarding IP packets between the local TUN and the server session.
+// runTUNListener 在客户端创建本地 TUN 设备并启动双向转发：
+//   goroutine: 本地 TUN → Session（发送 IP 包到服务端）
+//   主循环:    Session → 本地 TUN（接收来自服务端的 IP 包）
 func runTUNListener(sess *session.Session, cidr string, index int, assignedIP string) error {
 	devName := fmt.Sprintf("crfl%d", index)
 
-	// Remove any leftover device from a previous connection (ignore errors).
+	// 清理上次残留的设备
 	exec.Command("ip", "link", "del", devName).Run()
 
 	dev, err := tun.New(devName)
@@ -210,29 +200,24 @@ func runTUNListener(sess *session.Session, cidr string, index int, assignedIP st
 		return fmt.Errorf("create local TUN: %w", err)
 	}
 	defer dev.Close()
-	defer func() {
-		// Remove the device from the system on exit (reconnect / shutdown).
-		exec.Command("ip", "link", "del", devName).Run()
-	}()
+	defer exec.Command("ip", "link", "del", devName).Run() // 退出时删除设备
 
-	// Configure the TUN device with the assigned IP and bring it up.
+	// 配置 TUN 设备 IP 并启用
 	addr := assignedIP
 	_, nw, _ := net.ParseCIDR(cidr)
 	if nw != nil {
 		ones, _ := nw.Mask.Size()
 		addr = fmt.Sprintf("%s/%d", assignedIP, ones)
 	}
-
 	if err := exec.Command("ip", "addr", "add", addr, "dev", dev.Name()).Run(); err != nil {
 		return fmt.Errorf("ip addr add %s dev %s: %w", addr, dev.Name(), err)
 	}
 	if err := exec.Command("ip", "link", "set", dev.Name(), "up").Run(); err != nil {
 		return fmt.Errorf("ip link set %s up: %w", dev.Name(), err)
 	}
-
 	log.Printf("[tun-listener] local TUN %s up with %s", dev.Name(), addr)
 
-	// Goroutine: local TUN → session
+	// 发送：本地 TUN → Session
 	go func() {
 		buf := make([]byte, 64*1024)
 		for {
@@ -250,26 +235,25 @@ func runTUNListener(sess *session.Session, cidr string, index int, assignedIP st
 		}
 	}()
 
-	// Main goroutine: session → local TUN
+	// 接收：Session → 本地 TUN
 	for frame := range sess.FrameCh() {
 		if frame.Type == protocol.TypeDataTUN {
 			if _, err := dev.Write(frame.Payload); err != nil {
 				return fmt.Errorf("write local TUN: %w", err)
 			}
 		}
-		// Other frame types ignored in TUN mode.
 	}
-
 	return fmt.Errorf("session closed")
 }
 
-// configureTUNClient returns the registration payload for a TUN listener.
+// configureTUNClient 构造 TUN 监听器的注册载荷。
+// 格式：listener[,<index>],tun,<cidr>
 func configureTUNClient(listenSpec string, wantIndex int) (regPayload string, cidr string) {
 	cidr = listenSpec
-	regPayload = fmt.Sprintf("listener")
 	if wantIndex >= 0 {
-		regPayload = fmt.Sprintf("listener,%d", wantIndex)
+		regPayload = fmt.Sprintf("listener,%d,tun,%s", wantIndex, cidr)
+	} else {
+		regPayload = fmt.Sprintf("listener,tun,%s", cidr)
 	}
-	regPayload = fmt.Sprintf("%s,tun,%s", regPayload, cidr)
 	return regPayload, cidr
 }

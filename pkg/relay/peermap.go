@@ -6,15 +6,15 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
 )
 
-// PeerMap manages the pairing of listeners and forwarders by index.
-// Multiple forwarders can be registered at the same index (broadcast mode).
+// PeerMap 管理 listener 与 forwarder 的配对关系。
+// 按 index 分组，一个 listener 可以对应多个 forwarder（广播模式）。
 type PeerMap struct {
 	mu         sync.Mutex
-	listeners  map[int]protocol.FrameReadWriter
-	forwarders map[int][]protocol.FrameReadWriter
+	listeners  map[int]protocol.FrameReadWriter      // index → listener 连接
+	forwarders map[int][]protocol.FrameReadWriter    // index → forwarder 连接列表
 }
 
-// NewPeerMap creates an empty PeerMap.
+// NewPeerMap 创建一个空的 PeerMap。
 func NewPeerMap() *PeerMap {
 	return &PeerMap{
 		listeners:  make(map[int]protocol.FrameReadWriter),
@@ -22,7 +22,7 @@ func NewPeerMap() *PeerMap {
 	}
 }
 
-// RegisterListener adds a listener at the given index, replacing any stale one.
+// RegisterListener 在指定 index 注册一个 listener，替换旧的（若存在）。
 func (pm *PeerMap) RegisterListener(index int, conn protocol.FrameReadWriter) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -32,15 +32,16 @@ func (pm *PeerMap) RegisterListener(index int, conn protocol.FrameReadWriter) {
 	pm.listeners[index] = conn
 }
 
-// RegisterForwarder appends a forwarder at the given index.
+// RegisterForwarder 向指定 index 追加一个 forwarder。
+// 允许多个 forwarder 注册到同一个 index，实现广播。
 func (pm *PeerMap) RegisterForwarder(index int, conn protocol.FrameReadWriter) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.forwarders[index] = append(pm.forwarders[index], conn)
 }
 
-// UnregisterListener removes a listener and notifies all forwarders at
-// the same index with a PeerLeave frame.
+// UnregisterListener 移除 listener 并通知该 index 下所有 forwarder
+// 对端已断开（PeerLeave），然后清空 forwarder 列表。
 func (pm *PeerMap) UnregisterListener(index int) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -51,8 +52,8 @@ func (pm *PeerMap) UnregisterListener(index int) {
 	delete(pm.forwarders, index)
 }
 
-// UnregisterForwarder removes a specific forwarder from the slice.
-// It notifies the listener only when no forwarders remain at the index.
+// UnregisterForwarder 从指定 index 的 forwarder 列表中移除特定的连接。
+// 若该 index 下已无 forwarder，通知 listener 所有 forwarder 已离开。
 func (pm *PeerMap) UnregisterForwarder(index int, conn protocol.FrameReadWriter) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -70,8 +71,8 @@ func (pm *PeerMap) UnregisterForwarder(index int, conn protocol.FrameReadWriter)
 	}
 }
 
-// BroadcastFromListener sends a frame to all forwarders at the given index,
-// removing any dead connections from the slice.
+// BroadcastFromListener 将 listener 发来的帧广播给所有 forwarder，
+// 同时过滤掉已断开的 forwarder 连接。
 func (pm *PeerMap) BroadcastFromListener(index int, typ byte, payload []byte) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -87,8 +88,7 @@ func (pm *PeerMap) BroadcastFromListener(index int, typ byte, payload []byte) {
 	}
 }
 
-// SendToListener sends a frame from a forwarder to the listener at the
-// given index. Returns the listener's Send error (or nil if no listener).
+// SendToListener 将 forwarder 发来的帧转发给该 index 的 listener。
 func (pm *PeerMap) SendToListener(index int, typ byte, payload []byte) error {
 	pm.mu.Lock()
 	lis := pm.listeners[index]
@@ -99,14 +99,14 @@ func (pm *PeerMap) SendToListener(index int, typ byte, payload []byte) error {
 	return lis.Send(typ, payload)
 }
 
-// ListenerCount returns the number of active listeners.
+// ListenerCount 返回当前活跃的 listener 数量。
 func (pm *PeerMap) ListenerCount() int {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	return len(pm.listeners)
 }
 
-// HasListener returns whether a listener exists at the given index.
+// HasListener 检查指定 index 是否存在 listener。
 func (pm *PeerMap) HasListener(index int) bool {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -114,15 +114,15 @@ func (pm *PeerMap) HasListener(index int) bool {
 	return ok
 }
 
-// ForwarderCount returns the number of forwarders at the given index.
+// ForwarderCount 返回指定 index 下的 forwarder 数量。
 func (pm *PeerMap) ForwarderCount(index int) int {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	return len(pm.forwarders[index])
 }
 
-// ListenerIndices returns a snapshot of all listener indices.
-// Returns nil for the single-listener case to allow auto-pairing.
+// ListenerIndices 返回所有 listener index 的快照。
+// 用于 forwarder 自动配对（仅一个 listener 时可省略 -i 参数）。
 func (pm *PeerMap) ListenerIndices() []int {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()

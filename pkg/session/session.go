@@ -1,3 +1,5 @@
+// Package session 在 FrameReadWriter 之上提供异步帧收发能力，
+// 通过后台读泵将"读帧"和"处理帧"解耦到不同的 goroutine。
 package session
 
 import (
@@ -7,19 +9,17 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
 )
 
-// Session wraps a FrameReadWriter and manages all reading from the
-// underlying connection. Only the readLoop goroutine reads from the
-// connection; everyone else receives frames via the FrameCh channel.
+// Session 包装一个 FrameReadWriter，启动后台 goroutine 持续读取帧，
+// 并通过 channel 分发给业务层。业务层只需从 FrameCh 读取即可。
 type Session struct {
-	conn    protocol.FrameReadWriter
-	frameCh chan *protocol.Frame // 业务帧分发
-	closeCh chan struct{}        // 通知关闭
-	doneCh  chan struct{}        // 读泵退出信号
+	conn    protocol.FrameReadWriter // 底层帧连接
+	frameCh chan *protocol.Frame     // 帧分发通道，读泵写入，业务层读取
+	closeCh chan struct{}            // 通知读泵主动关闭
+	doneCh  chan struct{}            // 读泵退出信号
 }
 
-// NewSession creates a Session and starts the read loop.
-// readTimeout is the idle timeout for the underlying connection;
-// if no frame arrives within this duration, the session will be closed.
+// NewSession 创建 Session 并启动后台读泵。readTimeout 为空闲超时时间，
+// 超时后底层连接会被关闭，读泵退出。
 func NewSession(conn protocol.FrameReadWriter, readTimeout time.Duration) *Session {
 	s := &Session{
 		conn:    conn,
@@ -31,36 +31,34 @@ func NewSession(conn protocol.FrameReadWriter, readTimeout time.Duration) *Sessi
 	return s
 }
 
-// Send writes a frame through the connection. It is safe for concurrent use.
+// Send 通过底层连接发送一帧。并发安全。
 func (s *Session) Send(typ byte, payload []byte) error {
 	return s.conn.Send(typ, payload)
 }
 
-// FrameCh returns the channel on which incoming frames are delivered.
-// This channel will be closed when the session is closed.
+// FrameCh 返回帧分发通道。通道关闭表示 Session 已结束。
 func (s *Session) FrameCh() <-chan *protocol.Frame {
 	return s.frameCh
 }
 
-// Done returns a channel that is closed when the session's read loop exits
-// (due to connection loss, timeout, or explicit Close).
+// Done 返回一个在 Session 读泵退出后关闭的通道。
 func (s *Session) Done() <-chan struct{} {
 	return s.doneCh
 }
 
-// Close shuts down the session and the underlying connection.
+// Close 关闭 Session：通知读泵停止，等待其退出，然后关闭底层连接。
 func (s *Session) Close() error {
 	select {
-	case <-s.closeCh: // 已经关闭
+	case <-s.closeCh:
 	default:
 		close(s.closeCh)
 	}
-	// 等待读泵退出
 	<-s.doneCh
 	return s.conn.Close()
 }
 
-// readLoop is the sole goroutine that reads from the connection.
+// readLoop 是唯一的帧读取 goroutine。它持续从底层连接读帧并写入 frameCh。
+// 当连接断开、超时或被主动关闭时退出。
 func (s *Session) readLoop(readTimeout time.Duration) {
 	defer close(s.doneCh)
 	defer close(s.frameCh)

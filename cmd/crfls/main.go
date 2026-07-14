@@ -1,3 +1,16 @@
+// crfls 是 CloudMirror 中继服务端，负责接纳客户端连接、配对转发。
+//
+// 用法：
+//
+//	crfls -p 3862 -e <password> [-n <max_listeners>] [-s <cert:key>] [-t]
+//
+// 标志：
+//
+//	-p  监听端口（默认 3862）
+//	-n  最大 listener 数量（0 表示无限制）
+//	-e  预共享密钥
+//	-s  TLS 证书列表，格式 cert1:key1[;cert2:key2...]
+//	-t  启用 TUN 模式
 package main
 
 import (
@@ -23,14 +36,17 @@ func main() {
 		log.Fatal("please set password by -e")
 	}
 
+	// 创建服务实例
 	srv := relay.NewServer(*password, *maxListeners)
 
+	// 可选：启用 TUN 模式
 	if *tunMode {
 		if err := srv.StartTUNMode(); err != nil {
 			log.Fatalf("TUN mode init failed: %v", err)
 		}
 	}
 
+	// 根据是否指定证书选择 TLS 或普通 TCP 监听
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
 	var ln net.Listener
 	var err error
@@ -60,6 +76,7 @@ func main() {
 	}
 	log.Printf("crfls running, listen %s", addr)
 
+	// 接受连接循环
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
