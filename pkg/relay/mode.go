@@ -8,67 +8,59 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/session"
 )
 
-// Mode 抽象了客户端的转发模式。每种模式（TCP/UDP listener/forwarder、TUN）
-// 都实现此接口，Run 方法阻塞执行直到连接断开。
+// Mode 抽象了客户端的转发模式。
 type Mode interface {
-	// Run 启动当前模式的转发循环，阻塞直到 Session 关闭或发生致命错误。
 	Run(sess *session.Session, index int) error
 }
 
-// ---- TCP Listener ----
+// ModeFunc 将普通函数适配为 Mode 接口，避免为每种模式定义独立的 struct。
+type ModeFunc func(sess *session.Session, index int) error
 
-// tcpListenMode 在本地监听 TCP 端口，将新连接通过 Session 转发到 forwarder。
-type tcpListenMode struct{ addr string }
+func (f ModeFunc) Run(sess *session.Session, index int) error { return f(sess, index) }
 
-func (m tcpListenMode) Run(sess *session.Session, index int) error {
-	ln, err := net.Listen("tcp", m.addr)
-	if err != nil {
-		return fmt.Errorf("tcp listen: %w", err)
+// newClientMode 根据角色和参数创建对应的转发模式（工厂函数）。
+func newClientMode(role, listenSpec string, forwardPort, index int, assignedIP string, udpOnly, isTUN bool) (Mode, error) {
+	switch role {
+	case "listener":
+		if isTUN {
+			return ModeFunc(func(sess *session.Session, _ int) error {
+				log.Printf("TUN listener running, IP=%s, CIDR=%s", assignedIP, listenSpec)
+				return runTUNListener(sess, listenSpec, index, assignedIP)
+			}), nil
+		}
+		port, err := resolvePort(listenSpec, index)
+		if err != nil {
+			return nil, fmt.Errorf("resolve port: %w", err)
+		}
+		addr := fmt.Sprintf(":%d", port)
+		if udpOnly {
+			return ModeFunc(func(sess *session.Session, _ int) error {
+				log.Printf("UDP listener running, listen %s", addr)
+				return RunUDPListener(sess, addr)
+			}), nil
+		}
+		return ModeFunc(func(sess *session.Session, _ int) error {
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				return fmt.Errorf("tcp listen: %w", err)
+			}
+			defer ln.Close()
+			log.Printf("TCP listener running, listen %s", addr)
+			return RunTCPListener(sess, ln)
+		}), nil
+	case "forwarder":
+		target := fmt.Sprintf("127.0.0.1:%d", forwardPort)
+		if udpOnly {
+			return ModeFunc(func(sess *session.Session, _ int) error {
+				log.Printf("UDP forwarder running, forward to %s", target)
+				return RunUDPForwarder(sess, target)
+			}), nil
+		}
+		return ModeFunc(func(sess *session.Session, _ int) error {
+			log.Printf("TCP forwarder running, forward to %s", target)
+			return RunTCPForwarder(sess, target)
+		}), nil
+	default:
+		return nil, fmt.Errorf("unknown role: %s", role)
 	}
-	defer ln.Close()
-	log.Printf("TCP listener running, listen %s", m.addr)
-	return RunTCPListener(sess, ln)
-}
-
-// ---- UDP Listener ----
-
-// udpListenMode 在本地监听 UDP 端口，将数据包通过 Session 转发到 forwarder。
-type udpListenMode struct{ addr string }
-
-func (m udpListenMode) Run(sess *session.Session, index int) error {
-	log.Printf("UDP listener running, listen %s", m.addr)
-	return RunUDPListener(sess, m.addr)
-}
-
-// ---- TCP Forwarder ----
-
-// tcpForwardMode 将 Session 中的新连接请求转发到本地 TCP 目标地址。
-type tcpForwardMode struct{ target string }
-
-func (m tcpForwardMode) Run(sess *session.Session, index int) error {
-	log.Printf("TCP forwarder running, forward to %s", m.target)
-	return RunTCPForwarder(sess, m.target)
-}
-
-// ---- UDP Forwarder ----
-
-// udpForwardMode 将 Session 中的 UDP 数据包转发到本地 UDP 目标地址。
-type udpForwardMode struct{ target string }
-
-func (m udpForwardMode) Run(sess *session.Session, index int) error {
-	log.Printf("UDP forwarder running, forward to %s", m.target)
-	return RunUDPForwarder(sess, m.target)
-}
-
-// ---- TUN Listener ----
-
-// tunListenMode 在本地创建 TUN 虚拟网卡并分配 IP，通过 Session 转发 IP 包。
-type tunListenMode struct {
-	cidr       string // 虚拟网络 CIDR
-	assignedIP string // 服务端分配的虚拟 IP
-}
-
-func (m tunListenMode) Run(sess *session.Session, index int) error {
-	log.Printf("TUN listener running, IP=%s, CIDR=%s", m.assignedIP, m.cidr)
-	return runTUNListener(sess, m.cidr, index, m.assignedIP)
 }

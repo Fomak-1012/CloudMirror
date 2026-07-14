@@ -139,34 +139,6 @@ func runOnce(serverAddr, host, password, role string, forwardPort int,
 	return assignedIndex, mode.Run(sess, assignedIndex)
 }
 
-// newClientMode 根据角色和参数创建对应的转发模式实例。
-// 这是 Mode 接口的工厂函数，根据 index 解析出实际监听端口/地址。
-func newClientMode(role, listenSpec string, forwardPort, index int, assignedIP string, udpOnly, isTUN bool) (Mode, error) {
-	switch role {
-	case "listener":
-		if isTUN {
-			return &tunListenMode{cidr: listenSpec, assignedIP: assignedIP}, nil
-		}
-		port, err := resolvePort(listenSpec, index)
-		if err != nil {
-			return nil, fmt.Errorf("resolve port: %w", err)
-		}
-		addr := fmt.Sprintf(":%d", port)
-		if udpOnly {
-			return udpListenMode{addr: addr}, nil
-		}
-		return tcpListenMode{addr: addr}, nil
-	case "forwarder":
-		target := fmt.Sprintf("127.0.0.1:%d", forwardPort)
-		if udpOnly {
-			return udpForwardMode{target: target}, nil
-		}
-		return tcpForwardMode{target: target}, nil
-	default:
-		return nil, fmt.Errorf("unknown role: %s", role)
-	}
-}
-
 // waitForFrame 从 Session 的帧通道中等待指定类型的帧，超时返回错误。
 // 其他类型的帧会被忽略（如心跳帧）。
 func waitForFrame(sess *session.Session, typ byte, timeout time.Duration) (*protocol.Frame, error) {

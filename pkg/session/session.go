@@ -63,7 +63,6 @@ func (s *Session) readLoop(readTimeout time.Duration) {
 	defer close(s.doneCh)
 	defer close(s.frameCh)
 
-	log.Printf("[session] readLoop started")
 	for {
 		s.conn.SetReadDeadline(time.Now().Add(readTimeout))
 

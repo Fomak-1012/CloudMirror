@@ -45,12 +45,8 @@ func (s *Server) StartTUNMode() error {
 // HandleClient 处理一个客户端连接的全生命周期：
 // 认证 → 解析注册信息 → 分配 index → 进入 relayLoop 转发。
 func (s *Server) HandleClient(conn net.Conn) {
-	log.Printf("[server] HandleClient: new connection from %s", conn.RemoteAddr())
 	t := tunnel.NewTunnel(conn)
-	defer func() {
-		log.Printf("[server] HandleClient: closing tunnel from %s", conn.RemoteAddr())
-		t.Close()
-	}()
+	defer t.Close()
 
 	// 阶段 1：认证
 	if err := auth.ServerAuth(t, s.password); err != nil {
@@ -167,11 +163,9 @@ func (s *Server) HandleClient(conn net.Conn) {
 // listener：收到的帧广播给该 index 下的所有 forwarder。
 // forwarder：收到的帧转发给该 index 的 listener。
 func (s *Server) relayLoop(conn protocol.FrameReadWriter, role string, index int) {
-	log.Printf("[server] relayLoop %s[%d]: started", role, index)
 	for {
 		frame, err := conn.Receive()
 		if err != nil {
-			log.Printf("[server] relayLoop %s[%d]: recv error: %v — exiting loop", role, index, err)
 			break
 		}
 
@@ -187,7 +181,6 @@ func (s *Server) relayLoop(conn protocol.FrameReadWriter, role string, index int
 	}
 
 	// 清理：从 PeerMap 移除自己，通知对端
-	log.Printf("[server] relayLoop %s[%d]: cleaning up", role, index)
 	if role == "listener" {
 		s.peers.UnregisterListener(index)
 	} else {
