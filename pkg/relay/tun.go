@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
 	"github.com/Fomak-1012/CloudMirror/pkg/session"
@@ -36,7 +37,7 @@ func NewServerTUNContext() (*ServerTUNContext, error) {
 		indexToIP: make(map[int]string),
 	}
 
-	go ctx.tunReadLoop()
+	safeGo("tun-server-readloop", ctx.tunReadLoop)
 	return ctx, nil
 }
 
@@ -161,6 +162,7 @@ func (ctx *ServerTUNContext) Close() error { return ctx.dev.Close() }
 // 从客户端接收 TypeDataTUN 帧 → 写入服务端 TUN 设备。
 func serverTUNRelayLoop(conn protocol.FrameReadWriter, ctx *ServerTUNContext, index int) {
 	for {
+		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		frame, err := conn.Receive()
 		if err != nil {
 			break
@@ -207,7 +209,7 @@ func runTUNListener(sess *session.Session, cidr string, index int, assignedIP st
 	}
 
 	// 发送：本地 TUN → Session
-	go func() {
+	safeGo("tun-client-send", func() {
 		buf := make([]byte, 64*1024)
 		for {
 			n, err := dev.Read(buf)
@@ -220,7 +222,7 @@ func runTUNListener(sess *session.Session, cidr string, index int, assignedIP st
 				return
 			}
 		}
-	}()
+	})
 
 	// 接收：Session → 本地 TUN
 	for frame := range sess.FrameCh() {

@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudMirror 控制台</title>
+    <style>
+        /* --- 基础变量 & 全局样式 --- */
+        :root {
+            --bg-color: #1a1a2e;
+            --card-color: #16213e;
+            --accent-color: #0f9b8e;
+            --text-color: #e2e8f0;
+            --text-muted: #94a3b8;
+            --border-color: #243b55;
+            --danger-color: #e63946;
+            --success-color: #0f9b8e;
+            --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            padding: 24px;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        /* --- 头部区域 --- */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 16px;
+        }
+
+        .logo-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .version {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.05);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+        }
+
+        /* 状态指示灯 */
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            background: rgba(15, 155, 142, 0.1);
+            padding: 6px 12px;
+            border-radius: 20px;
+            border: 1px solid rgba(15, 155, 142, 0.2);
+            transition: all 0.3s ease;
+        }
+
+        .status-indicator.offline {
+            background: rgba(230, 57, 70, 0.1);
+            border-color: rgba(230, 57, 70, 0.2);
+            color: var(--danger-color);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success-color);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--success-color);
+        }
+
+        .status-indicator.offline .status-dot {
+            background-color: var(--danger-color);
+            box-shadow: 0 0 8px var(--danger-color);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.4; }
+            50% { opacity: 1; }
+            100% { opacity: 0.4; }
+        }
+
+        /* --- 仪表盘网格 --- */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .stat-card {
+            background-color: var(--card-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            font-family: var(--font-mono);
+            color: #ffffff;
+        }
+
+        /* --- 业务数据板块 --- */
+        .section-title {
+            font-size: 1.1rem;
+            margin-bottom: 16px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-title::after {
+            content: "";
+            flex-grow: 1;
+            height: 1px;
+            background: var(--border-color);
+        }
+
+        .table-container {
+            background-color: var(--card-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow-x: auto;
+            margin-bottom: 32px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: rgba(255, 255, 255, 0.02);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tbody tr {
+            transition: background-color 0.2s ease;
+        }
+
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        tbody tr:nth-child(even) {
+            background-color: rgba(255, 255, 255, 0.01);
+        }
+
+        tbody tr:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+
+        /* 等宽字体类 */
+        .mono {
+            font-family: var(--font-mono);
+            letter-spacing: -0.3px;
+        }
+
+        /* 标签样式 */
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            font-family: var(--font-mono);
+        }
+
+        .badge-tcp {
+            background: rgba(15, 155, 142, 0.15);
+            color: var(--accent-color);
+            border: 1px solid rgba(15, 155, 142, 0.3);
+        }
+
+        .badge-udp {
+            background: rgba(168, 85, 247, 0.15);
+            color: #a855f7;
+            border: 1px solid rgba(168, 85, 247, 0.3);
+        }
+
+        .badge-tun {
+            background: rgba(245, 158, 11, 0.15);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        /* --- 刷新高亮动画 --- */
+        @keyframes row-update {
+            0% { background-color: rgba(15, 155, 142, 0.3); }
+            100% { background-color: transparent; }
+        }
+
+        .row-flash {
+            animation: row-update 1.2s cubic-bezier(0.25, 1, 0.5, 1);
+        }
+
+        /* 无数据提示 */
+        .empty-row {
+            text-align: center;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        /* 响应式调整 */
+        @media (max-width: 768px) {
+            body {
+                padding: 16px;
+            }
+            .stats-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        @media (max-width: 480px) {
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- 头部 -->
+        <header>
+            <div class="logo-group">
+                <h1>CloudMirror Console</h1>
+                <span class="version" id="app-version">v0.0.0</span>
+            </div>
+            <div class="status-indicator" id="conn-status">
+                <div class="status-dot"></div>
+                <span id="conn-status-text">连接正常</span>
+            </div>
+        </header>
+
+        <!-- 顶部状态面板 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <span class="stat-label">运行时间</span>
+                <span class="stat-value" id="stat-uptime">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Listeners 数</span>
+                <span class="stat-value" id="stat-listeners">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Forwarders 数</span>
+                <span class="stat-value" id="stat-forwarders">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">活跃数据流</span>
+                <span class="stat-value" id="stat-streams">-</span>
+            </div>
+        </div>
+
+        <!-- Listeners 板块 -->
+        <div class="section-title">Listeners 监听列表</div>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 80px;">Index</th>
+                        <th>对端地址</th>
+                        <th>运行时长</th>
+                        <th style="width: 120px;">模式</th>
+                        <th>监听端口</th>
+                    </tr>
+                </thead>
+                <tbody id="listeners-tbody">
+                    <tr>
+                        <td colspan="5" class="empty-row">等待数据加载...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Forwarders 板块 -->
+        <div class="section-title">Forwarders 转发列表</div>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 80px;">Index</th>
+                        <th>对端地址</th>
+                        <th>运行时长</th>
+                        <th style="width: 120px;">模式</th>
+                        <th>转发目标</th>
+                    </tr>
+                </thead>
+                <tbody id="forwarders-tbody">
+                    <tr>
+                        <td colspan="5" class="empty-row">等待数据加载...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 逻辑控制脚本 -->
+    <script>
+        // 状态变量，用于数据脏检查，触发更新动画
+        let previousPeersData = { listeners: [], forwarders: [] };
+
+        // DOM 缓存
+        const dom = {
+            version: document.getElementById('app-version'),
+            statusIndicator: document.getElementById('conn-status'),
+            statusText: document.getElementById('conn-status-text'),
+            uptime: document.getElementById('stat-uptime'),
+            listenersCount: document.getElementById('stat-listeners'),
+            forwardersCount: document.getElementById('stat-forwarders'),
+            streamsCount: document.getElementById('stat-streams'),
+            listenersBody: document.getElementById('listeners-tbody'),
+            forwardersBody: document.getElementById('forwarders-tbody')
+        };
+
+        // 获取模式 Badge 的样式
+        function getModeBadge(mode) {
+            const cleanMode = (mode || 'tcp').toLowerCase();
+            return `<span class="badge badge-${cleanMode}">${cleanMode.toUpperCase()}</span>`;
+        }
+
+        // SSE 实时推送，无需轮询函数
+
+        // 更新状态面板
+        function updateStats(stats) {
+            dom.uptime.textContent = stats.uptime || '-';
+            dom.listenersCount.textContent = stats.listener_count !== undefined ? stats.listener_count : '-';
+            dom.forwardersCount.textContent = stats.forwarder_count !== undefined ? stats.forwarder_count : '-';
+            dom.streamsCount.textContent = stats.total_streams !== undefined ? stats.total_streams : '-';
+            dom.version.textContent = `v${stats.version || '0.0.0'}`;
+        }
+
+        // 生成 Peers 变更标识（用于检测行是否有变化）
+        function getRowFingerprint(peer, type) {
+            if (type === 'listener') {
+                return `${peer.index}-${peer.remote}-${peer.uptime}-${peer.mode}-${peer.port}`;
+            }
+            return `${peer.index}-${peer.remote}-${peer.uptime}-${peer.mode}-${peer.target}`;
+        }
+
+        // 渲染表格逻辑
+        function renderTable(tbody, dataList, type, prevList) {
+            if (!dataList || dataList.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="empty-row">当前无活跃的 ${type}</td></tr>`;
+                return;
+            }
+
+            const fragment = document.createDocumentFragment();
+
+            dataList.forEach((peer, idx) => {
+                const tr = document.createElement('tr');
+                
+                // 数据比对：检查对应的旧行数据是否一致，如果不一致则添加高亮动画类
+                const fingerprint = getRowFingerprint(peer, type);
+                const oldPeer = prevList ? prevList[idx] : null;
+                const oldFingerprint = oldPeer ? getRowFingerprint(oldPeer, type) : null;
+
+                if (oldFingerprint && fingerprint !== oldFingerprint) {
+                    tr.classList.add('row-flash');
+                }
+
+                if (type === 'listener') {
+                    tr.innerHTML = `
+                        <td class="mono">${peer.index}</td>
+                        <td class="mono">${peer.remote}</td>
+                        <td class="mono">${peer.uptime}</td>
+                        <td>${getModeBadge(peer.mode)}</td>
+                        <td class="mono" style="color: var(--accent-color); font-weight:600;">${peer.port}</td>
+                    `;
+                } else {
+                    tr.innerHTML = `
+                        <td class="mono">${peer.index}</td>
+                        <td class="mono">${peer.remote}</td>
+                        <td class="mono">${peer.uptime}</td>
+                        <td>${getModeBadge(peer.mode)}</td>
+                        <td class="mono" style="color: var(--accent-color);">${peer.target}</td>
+                    `;
+                }
+                fragment.appendChild(tr);
+            });
+
+            tbody.innerHTML = '';
+            tbody.appendChild(fragment);
+        }
+
+        // 更新连接状态 UI
+        function setConnectionStatus(isOnline) {
+            if (isOnline) {
+                dom.statusIndicator.classList.remove('offline');
+                dom.statusText.textContent = '连接正常';
+            } else {
+                dom.statusIndicator.classList.add('offline');
+                dom.statusText.textContent = '连接断开';
+                
+                // 断开连接时，将大盘数字重置
+                dom.uptime.textContent = 'OFFLINE';
+                dom.listenersCount.textContent = '-';
+                dom.forwardersCount.textContent = '-';
+                dom.streamsCount.textContent = '-';
+            }
+        }
+
+        // SSE 实时推送：服务端在 peers 变更时主动推送，延迟 < 1ms
+        const evtSource = new EventSource('/api/events');
+
+        evtSource.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                updateStats(data.stats);
+
+                renderTable(dom.listenersBody, data.peers.listeners, 'listener', previousPeersData.listeners);
+                renderTable(dom.forwardersBody, data.peers.forwarders, 'forwarder', previousPeersData.forwarders);
+
+                previousPeersData = JSON.parse(JSON.stringify(data.peers));
+                setConnectionStatus(true);
+            } catch (error) {
+                console.error('SSE parse error:', error);
+            }
+        };
+
+        evtSource.onerror = function() {
+            setConnectionStatus(false);
+            // EventSource 自动重连
+        };
+    </script>
+</body>
+</html>

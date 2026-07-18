@@ -1,52 +1,66 @@
 // crfls 是 CloudMirror 中继服务端，负责接纳客户端连接、配对转发。
-//
-// 用法：
-//
-//	crfls -p 3862 -e <password> [-n <max_listeners>] [-s <cert:key>] [-t]
-//
-// 标志：
-//
-//	-p  监听端口（默认 3862）
-//	-n  最大 listener 数量（0 表示无限制）
-//	-e  预共享密钥
-//	-s  TLS 证书列表，格式 cert1:key1[;cert2:key2...]
-//	-t  启用 TUN 模式
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/relay"
+	"github.com/Fomak-1012/CloudMirror/pkg/relay/web"
 )
 
 func main() {
-	port := flag.Int("p", 3862, "listening port")
+	port := flag.Int("p", 3862, "relay listening port")
 	maxListeners := flag.Int("n", 0, "max number of listeners, 0 means no limit")
 	password := flag.String("e", "", "pre-shared password")
 	certlist := flag.String("s", "", "TLS certification lists")
 	tunMode := flag.Bool("t", false, "enable TUN device mode")
+	webPort := flag.Int("w", 0, "web console port (0 = disabled)")
 	flag.Parse()
 
 	if *password == "" {
 		log.Fatal("please set password by -e")
 	}
 
-	// 创建服务实例
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	srv := relay.NewServer(*password, *maxListeners)
 
-	// 可选：启用 TUN 模式
 	if *tunMode {
 		if err := srv.StartTUNMode(); err != nil {
 			log.Fatalf("TUN mode init failed: %v", err)
 		}
 	}
 
-	// 根据是否指定证书选择 TLS 或普通 TCP 监听
+	// 可选：启动 Web 控制台（含 SSE 实时推送）
+	if *webPort > 0 {
+		addr := fmt.Sprintf(":%d", *webPort)
+		notify, webSrv, err := web.Serve(addr, srv)
+		if err != nil {
+			log.Printf("[web] setup error: %v", err)
+		} else {
+			go func() {
+				log.Printf("[web] listening on %s", addr)
+				if err := webSrv.ListenAndServe(); err != http.ErrServerClosed {
+					log.Printf("[web] error: %v", err)
+				}
+			}()
+			// 将 SSE 推送回调注入 relay.Server，peers 变更时自动推送
+			srv.SetPeerChangeCallback(notify)
+			defer webSrv.Shutdown(context.Background())
+		}
+	}
+
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
 	var ln net.Listener
 	var err error
@@ -76,12 +90,25 @@ func main() {
 	}
 	log.Printf("crfls running, listen %s", addr)
 
-	// 接受连接循环
+	go func() {
+		<-ctx.Done()
+		log.Printf("received signal, shutting down...")
+		ln.Close()
+	}()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("accept error: %v", err)
-			continue
+			select {
+			case <-ctx.Done():
+				log.Println("shutting down, waiting up to 30s for active connections...")
+				srv.Shutdown(30 * time.Second)
+				log.Println("server stopped")
+				return
+			default:
+				log.Printf("accept error: %v", err)
+				continue
+			}
 		}
 		go srv.HandleClient(conn)
 	}

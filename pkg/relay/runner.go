@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -15,8 +16,8 @@ import (
 )
 
 // RunClient 是客户端的主入口，负责建立连接、认证、注册，并在连接断开时自动重连。
-// isTUN 由调用方根据 listenSpec 是否包含 "/" 来判断。
-func RunClient(host string, port int, password string, forwardPort int,
+// ctx 用于接收终止信号，取消时停止重连退出。
+func RunClient(ctx context.Context, host string, port int, password string, forwardPort int,
 	listenSpec string, wantIndex int, udpOnly bool, tlsInsecure bool) error {
 
 	// 确定角色
@@ -44,6 +45,14 @@ func RunClient(host string, port int, password string, forwardPort int,
 
 	actualIndex := wantIndex
 	for {
+		// 检查是否收到终止信号
+		select {
+		case <-ctx.Done():
+			log.Println("client shutting down")
+			return ctx.Err()
+		default:
+		}
+
 		assignedIndex, err := runOnce(serverAddr, host, password, role, forwardPort,
 			listenSpec, actualIndex, udpOnly, tlsInsecure, isTUN)
 		if err == nil {
@@ -52,7 +61,14 @@ func RunClient(host string, port int, password string, forwardPort int,
 		// 记住上次分配到的 index，重连时请求相同的 index 以避免端口漂移
 		actualIndex = assignedIndex
 		log.Printf("client disconnected: %v, reconnecting in %v...", err, backoff)
-		time.Sleep(backoff)
+
+		// 可中断的 sleep
+		select {
+		case <-ctx.Done():
+			log.Println("client shutting down")
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
@@ -95,14 +111,31 @@ func runOnce(serverAddr, host, password, role string, forwardPort int,
 	}
 	log.Println("auth pass")
 
-	// 5. 构造并发送注册载荷
+	// 5. 构造并发送注册载荷（附带模式信息，用于 Web 控制台展示）
 	var regPayload string
 	if isTUN {
 		regPayload, _ = configureTUNClient(listenSpec, wantIndex)
-	} else {
-		regPayload = role
+	} else if role == "listener" {
+		port, _ := resolvePort(listenSpec, wantIndex)
+		proto := "tcp"
+		if udpOnly {
+			proto = "udp"
+		}
 		if wantIndex >= 0 {
-			regPayload = fmt.Sprintf("%s,%d", role, wantIndex)
+			regPayload = fmt.Sprintf("listener,%d,%s,%d", wantIndex, proto, port)
+		} else {
+			regPayload = fmt.Sprintf("listener,,%s,%d", proto, port)
+		}
+	} else {
+		proto := "tcp"
+		if udpOnly {
+			proto = "udp"
+		}
+		target := fmt.Sprintf("127.0.0.1:%d", forwardPort)
+		if wantIndex >= 0 {
+			regPayload = fmt.Sprintf("forwarder,%d,%s,%s", wantIndex, proto, target)
+		} else {
+			regPayload = fmt.Sprintf("forwarder,,%s,%s", proto, target)
 		}
 	}
 	if err := sess.Send(protocol.TypeRegister, []byte(regPayload)); err != nil {

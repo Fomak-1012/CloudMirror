@@ -3,6 +3,7 @@ package relay
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
@@ -34,7 +35,6 @@ func handleServerFrames(sess *session.Session, sm *StreamMap) {
 }
 
 // connReadLoop 在 forwarder 端运行，从目标连接读取数据并发送到 Session。
-// bufSize 指定读缓冲区大小（TCP 通常 32KB，UDP 通常 64KB）。
 func connReadLoop(sess *session.Session, sid uint16, conn net.Conn, sm *StreamMap, bufSize int) {
 	defer conn.Close()
 	defer sess.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
@@ -60,13 +60,8 @@ func RunTCPListener(sess *session.Session, ln net.Listener) error {
 	defer ln.Close()
 
 	sm := NewStreamMap()
-	go handleServerFrames(sess, sm)
-
-	// Session 结束时关闭监听器
-	go func() {
-		<-sess.Done()
-		ln.Close()
-	}()
+	safeGo("tcp-handleServerFrames", func() { handleServerFrames(sess, sm) })
+	safeGo("tcp-listener-close", func() { <-sess.Done(); ln.Close() })
 
 	for {
 		conn, err := ln.Accept()
@@ -76,7 +71,7 @@ func RunTCPListener(sess *session.Session, ln net.Listener) error {
 		sid := sm.Add(conn)
 		sess.Send(protocol.TypePeerJoin, uint16ToBytes(sid))
 
-		go func(sid uint16, conn net.Conn) {
+		safeGo("tcp-listener-read", func() {
 			defer conn.Close()
 			defer sess.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
 			defer sm.Remove(sid)
@@ -91,10 +86,11 @@ func RunTCPListener(sess *session.Session, ln net.Listener) error {
 				binary.BigEndian.PutUint16(payload[:2], sid)
 				copy(payload[2:], buf[:n])
 				if err := sess.Send(protocol.TypeDataTCP, payload); err != nil {
+					log.Printf("[tcp] listener send error: %v", err)
 					return
 				}
 			}
-		}(sid, conn)
+		})
 	}
 }
 
@@ -115,7 +111,7 @@ func RunTCPForwarder(sess *session.Session, targetAddr string) error {
 				continue
 			}
 			sm.AddWithID(conn, sid)
-			go connReadLoop(sess, sid, conn, sm, 32*1024)
+			safeGo("tcp-connReadLoop", func() { connReadLoop(sess, sid, conn, sm, 32*1024) })
 		case protocol.TypeDataTCP:
 			if len(frame.Payload) < 2 {
 				continue

@@ -3,6 +3,7 @@ package tunnel
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/Fomak-1012/CloudMirror/pkg/protocol"
@@ -11,7 +12,8 @@ import (
 // Tunnel 在 net.Conn 之上提供协议帧的收发能力，实现了 protocol.FrameReadWriter 接口。
 // 它是 Session 的底层传输载体。
 type Tunnel struct {
-	conn net.Conn // 底层 TCP/TLS 连接
+	conn    net.Conn    // 底层 TCP/TLS 连接
+	writeMu sync.Mutex  // 保护 Send 的并发写入，防止帧交错
 }
 
 // NewTunnel 基于已有连接创建一个 Tunnel。
@@ -19,8 +21,10 @@ func NewTunnel(conn net.Conn) *Tunnel {
 	return &Tunnel{conn: conn}
 }
 
-// Send 将一帧编码后写入底层连接。
+// Send 将一帧编码后写入底层连接。并发安全。
 func (t *Tunnel) Send(frameType byte, payload []byte) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	return protocol.WriteFrame(t.conn, frameType, payload)
 }
 
@@ -41,7 +45,7 @@ func (t *Tunnel) RemoteAddr() net.Addr {
 
 // SetReadDeadline 设置读取超时截止时间。
 func (t *Tunnel) SetReadDeadline(tm time.Time) error {
-	return t.conn.SetDeadline(tm)
+	return t.conn.SetReadDeadline(tm)
 }
 
 // SetWriteDeadline 设置写入超时截止时间。

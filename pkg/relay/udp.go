@@ -29,7 +29,7 @@ func RunUDPListener(sess *session.Session, listenAddr string) error {
 	var mu sync.Mutex
 
 	// 后台处理来自 forwarder 的帧
-	go func() {
+	safeGo("udp-handleFrames", func() {
 		for frame := range sess.FrameCh() {
 			switch frame.Type {
 			case protocol.TypeDataUDP:
@@ -37,12 +37,11 @@ func RunUDPListener(sess *session.Session, listenAddr string) error {
 					continue
 				}
 				sid := binary.BigEndian.Uint16(frame.Payload[:2])
-				data := frame.Payload[2:]
 				mu.Lock()
 				addr, ok := clients[sid]
 				mu.Unlock()
 				if ok {
-					conn.WriteToUDP(data, addr)
+					conn.WriteToUDP(frame.Payload[2:], addr)
 				}
 			case protocol.TypePeerLeave:
 				if len(frame.Payload) >= 2 {
@@ -53,13 +52,10 @@ func RunUDPListener(sess *session.Session, listenAddr string) error {
 				}
 			}
 		}
-	}()
+	})
 
 	// Session 结束时关闭 UDP 监听
-	go func() {
-		<-sess.Done()
-		conn.Close()
-	}()
+	safeGo("udp-listener-close", func() { <-sess.Done(); conn.Close() })
 
 	buf := make([]byte, 64*1024)
 	for {
@@ -86,7 +82,10 @@ func RunUDPListener(sess *session.Session, listenAddr string) error {
 		mu.Unlock()
 
 		if !found {
-			sess.Send(protocol.TypePeerJoin, uint16ToBytes(sid))
+			if err := sess.Send(protocol.TypePeerJoin, uint16ToBytes(sid)); err != nil {
+				log.Printf("[udp] send PeerJoin error: %v", err)
+				continue
+			}
 		}
 
 		payload := make([]byte, 2+n)
@@ -117,7 +116,7 @@ func RunUDPForwarder(sess *session.Session, targetAddr string) error {
 				continue
 			}
 			sm.AddWithID(conn, sid)
-			go connReadLoop(sess, sid, conn, sm, 64*1024)
+			safeGo("udp-connReadLoop", func() { connReadLoop(sess, sid, conn, sm, 64*1024) })
 		case protocol.TypeDataUDP:
 			if len(frame.Payload) < 2 {
 				continue
