@@ -32,6 +32,14 @@ func (pm *PeerMap) RegisterListener(index int, conn protocol.FrameReadWriter) {
 	pm.listeners[index] = conn
 }
 
+// GetListener 返回指定 index 的 listener 连接（可能为 nil）。
+// 用于查询 listener 的元信息（如模式），不持锁返回。
+func (pm *PeerMap) GetListener(index int) protocol.FrameReadWriter {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.listeners[index]
+}
+
 // RegisterForwarder 向指定 index 追加一个 forwarder。
 // 允许多个 forwarder 注册到同一个 index，实现广播。
 func (pm *PeerMap) RegisterForwarder(index int, conn protocol.FrameReadWriter) {

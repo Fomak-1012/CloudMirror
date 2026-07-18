@@ -211,6 +211,16 @@ func (s *Server) HandleClient(conn net.Conn) {
 			}
 			index = indices[0]
 		}
+		// 检查协议匹配：TCP-only forwarder 不能连 UDP-only listener（反之亦然）
+		if lis := s.peers.GetListener(index); lis != nil {
+			s.metaMu.Lock()
+			lisMeta, ok := s.meta[lis]
+			s.metaMu.Unlock()
+			if ok && lisMeta.mode != mode {
+				t.Send(protocol.TypeError, []byte(fmt.Sprintf("protocol mismatch: listener is %s, forwarder is %s", lisMeta.mode, mode)))
+				return
+			}
+		}
 		s.peers.RegisterForwarder(index, t)
 		s.storeMeta(t, &peerMeta{connectedAt: time.Now(), mode: mode, target: metaStr})
 		s.notifyPeerChange()

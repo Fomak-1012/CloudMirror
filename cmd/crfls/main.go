@@ -20,9 +20,9 @@ import (
 
 func main() {
 	port := flag.Int("p", 3862, "relay listening port")
-	maxListeners := flag.Int("n", 0, "max number of listeners, 0 means no limit")
+	maxListeners := flag.Int("n", 1, "max number of listeners (default 1), 0 means no limit")
 	password := flag.String("e", "", "pre-shared password")
-	certlist := flag.String("s", "", "TLS certification lists")
+	certlist := flag.String("s", "", "TLS cert list: cert:key[,cert2:key2...]")
 	tunMode := flag.Bool("t", false, "enable TUN device mode")
 	webPort := flag.Int("w", 0, "web console port (0 = disabled)")
 	flag.Parse()
@@ -66,7 +66,7 @@ func main() {
 	var err error
 
 	if *certlist != "" {
-		pairs := strings.Split(*certlist, ";")
+		pairs := strings.Split(*certlist, ",")
 		var certs []tls.Certificate
 		for _, pair := range pairs {
 			parts := strings.SplitN(pair, ":", 2)

@@ -18,7 +18,7 @@ import (
 // RunClient 是客户端的主入口，负责建立连接、认证、注册，并在连接断开时自动重连。
 // ctx 用于接收终止信号，取消时停止重连退出。
 func RunClient(ctx context.Context, host string, port int, password string, forwardPort int,
-	listenSpec string, wantIndex int, udpOnly bool, tlsInsecure bool) error {
+	listenSpec string, wantIndex int, udpOnly bool, tlsVerify bool, tlsInsecure bool) error {
 
 	// 确定角色
 	role := ""
@@ -54,7 +54,7 @@ func RunClient(ctx context.Context, host string, port int, password string, forw
 		}
 
 		assignedIndex, err := runOnce(serverAddr, host, password, role, forwardPort,
-			listenSpec, actualIndex, udpOnly, tlsInsecure, isTUN)
+			listenSpec, actualIndex, udpOnly, tlsVerify, tlsInsecure, isTUN)
 		if err == nil {
 			return nil
 		}
@@ -79,12 +79,17 @@ func RunClient(ctx context.Context, host string, port int, password string, forw
 // runOnce 执行一次完整的客户端生命周期：连接 → 认证 → 注册 → 模式转发。
 // 返回服务端分配到的 index 用于重连时保持 index 不变。
 func runOnce(serverAddr, host, password, role string, forwardPort int,
-	listenSpec string, wantIndex int, udpOnly, tlsInsecure, isTUN bool) (int, error) {
+	listenSpec string, wantIndex int, udpOnly, tlsVerify, tlsInsecure, isTUN bool) (int, error) {
 
 	// 1. 建立 TCP 或 TLS 连接
 	var conn net.Conn
 	var err error
-	if tlsInsecure {
+	if tlsVerify {
+		// 正确验证服务器证书（ServerName 用于 SNI 和证书校验）
+		tlsConfig := &tls.Config{ServerName: host}
+		conn, err = tls.Dial("tcp", serverAddr, tlsConfig)
+	} else if tlsInsecure {
+		// 仅测试用：跳过证书验证
 		tlsConfig := &tls.Config{InsecureSkipVerify: true, ServerName: host}
 		conn, err = tls.Dial("tcp", serverAddr, tlsConfig)
 	} else {
