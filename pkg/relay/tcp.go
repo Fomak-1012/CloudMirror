@@ -10,31 +10,31 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/session"
 )
 
-// handleServerFrames 在 listener 端运行，处理来自 forwarder 的帧。
-func handleServerFrames(sess *session.Session, sm *StreamMap) {
+// 在 listener 端运行，处理来自 forwarder 的帧
+// 负责将 DataTCP 写入对应的本地连接，PeerLeave 则关闭连接。
+func handleForwarderFrames(sess *session.Session, sm *StreamMap) {
 	for frame := range sess.FrameCh() {
+		if len(frame.Payload) < 2 {
+			continue
+		}
+		sid := binary.BigEndian.Uint16(frame.Payload[:2])
+
 		switch frame.Type {
 		case protocol.TypeDataTCP:
-			if len(frame.Payload) < 2 {
-				continue
-			}
-			sid := binary.BigEndian.Uint16(frame.Payload[:2])
 			if conn := sm.Get(sid); conn != nil {
 				conn.Write(frame.Payload[2:])
 			}
 		case protocol.TypePeerLeave:
-			if len(frame.Payload) >= 2 {
-				sid := binary.BigEndian.Uint16(frame.Payload[:2])
-				if conn := sm.Get(sid); conn != nil {
-					conn.Close()
-					sm.Remove(sid)
-				}
+			if conn := sm.Get(sid); conn != nil {
+				conn.Close()
+				sm.Remove(sid)
 			}
 		}
 	}
 }
 
-// connReadLoop 在 forwarder 端运行，从目标连接读取数据并发送到 Session。
+// connReadLoop 从目标连接持续读取数据，封装为 DataTCP 帧发送到 Session。
+// 连接关闭或发送失败时自动清理 sid 并通知对端。
 func connReadLoop(sess *session.Session, sid uint16, conn net.Conn, sm *StreamMap, bufSize int) {
 	defer conn.Close()
 	defer sess.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
@@ -55,78 +55,74 @@ func connReadLoop(sess *session.Session, sid uint16, conn net.Conn, sm *StreamMa
 	}
 }
 
-// RunTCPListener 在 listener 端运行 TCP 监听循环。
+// 在 listener 端运行 TCP 监听循环
 func RunTCPListener(sess *session.Session, ln net.Listener) error {
 	defer ln.Close()
 
 	sm := NewStreamMap()
-	safeGo("tcp-handleServerFrames", func() { handleServerFrames(sess, sm) })
+	// 处理 Session 帧，写入本地连接
+	safeGo("tcp-handleForwarderFrames", func() { handleForwarderFrames(sess, sm) })
+	// 等待 Session 结束 -> 关闭监听器
 	safeGo("tcp-listener-close", func() { <-sess.Done(); ln.Close() })
 
 	for {
+		// 接受新连接
 		conn, err := ln.Accept()
 		if err != nil {
 			return fmt.Errorf("listener closed: %w", err)
 		}
+
+		// 分配 sid
 		sid := sm.Add(conn)
-		sess.Send(protocol.TypePeerJoin, uint16ToBytes(sid))
+		if err := sess.Send(protocol.TypePeerJoin, uint16ToBytes(sid)); err != nil {
+			log.Printf("[tcp] send PeerJoin error: %v", err)
+			conn.Close()
+			sm.Remove(sid)
+			continue
+		}
 
-		safeGo("tcp-listener-read", func() {
-			defer conn.Close()
-			defer sess.Send(protocol.TypePeerLeave, uint16ToBytes(sid))
-			defer sm.Remove(sid)
-
-			buf := make([]byte, 32*1024)
-			for {
-				n, err := conn.Read(buf)
-				if err != nil {
-					return
-				}
-				payload := make([]byte, 2+n)
-				binary.BigEndian.PutUint16(payload[:2], sid)
-				copy(payload[2:], buf[:n])
-				if err := sess.Send(protocol.TypeDataTCP, payload); err != nil {
-					log.Printf("[tcp] listener send error: %v", err)
-					return
-				}
-			}
+		// 为每个连接启动 connReadLoop
+		safeGo("tcp-connReadLoop", func() {
+			connReadLoop(sess, sid, conn, sm, 32*1024)
 		})
 	}
 }
 
-// RunTCPForwarder 在 forwarder 端运行 TCP 转发循环。
+// 在 forwarder 端运行 TCP 转发循环
 func RunTCPForwarder(sess *session.Session, targetAddr string) error {
 	sm := NewStreamMap()
 
 	for frame := range sess.FrameCh() {
+		if len(frame.Payload) < 2 {
+			continue
+		}
+		sid := binary.BigEndian.Uint16(frame.Payload[:2])
+
+		// 处理帧类型
 		switch frame.Type {
+		// 建立到目标地址的新连接，启动 connReadLoop
 		case protocol.TypePeerJoin:
-			if len(frame.Payload) < 2 {
-				continue
-			}
-			sid := binary.BigEndian.Uint16(frame.Payload)
 			conn, err := net.Dial("tcp", targetAddr)
 			if err != nil {
-				sess.Send(protocol.TypePeerLeave, frame.Payload)
+				sess.Send(protocol.TypePeerLeave, frame.Payload[:2])
 				continue
 			}
 			sm.AddWithID(conn, sid)
-			safeGo("tcp-connReadLoop", func() { connReadLoop(sess, sid, conn, sm, 32*1024) })
+			safeGo("tcp-connReadLoop", func() {
+				connReadLoop(sess, sid, conn, sm, 32*1024)
+			})
+
+		// 写入对应的目标连接
 		case protocol.TypeDataTCP:
-			if len(frame.Payload) < 2 {
-				continue
-			}
-			sid := binary.BigEndian.Uint16(frame.Payload[:2])
 			if conn := sm.Get(sid); conn != nil {
 				conn.Write(frame.Payload[2:])
 			}
+
+		// 关闭对应的目标连接
 		case protocol.TypePeerLeave:
-			if len(frame.Payload) >= 2 {
-				sid := binary.BigEndian.Uint16(frame.Payload[:2])
-				if conn := sm.Get(sid); conn != nil {
-					conn.Close()
-					sm.Remove(sid)
-				}
+			if conn := sm.Get(sid); conn != nil {
+				conn.Close()
+				sm.Remove(sid)
 			}
 		}
 	}

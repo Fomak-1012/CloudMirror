@@ -42,7 +42,7 @@ func main() {
 		}
 	}
 
-	// 可选：启动 Web 控制台（含 SSE 实时推送）
+	// 启动 Web 控制台
 	if *webPort > 0 {
 		addr := fmt.Sprintf(":%d", *webPort)
 		notify, webSrv, err := web.Serve(addr, srv)

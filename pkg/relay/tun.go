@@ -13,13 +13,17 @@ import (
 	"github.com/Fomak-1012/CloudMirror/pkg/tun"
 )
 
-// ServerTUNContext 持有服务端 TUN 模式的共享状态，包括 TUN 设备、
-// IP 池和 IP → 客户端隧道的路由表。
+// ============================================================================
+// 服务端 TUN 上下文
+// ============================================================================
+
+// ServerTUNContext 持有服务端 TUN 模式的共享状态：
+// TUN 设备、IP 分配池、IP → 客户端隧道路由表。
 type ServerTUNContext struct {
 	mu        sync.Mutex
-	dev       *tun.Dev                           // 服务端 TUN 设备
-	pool      *tun.Pool                          // IP 分配池
-	cidrStr   string                             // 首个客户端注册的 CIDR
+	dev       *tun.Dev                            // 服务端 TUN 设备
+	pool      *tun.Pool                           // IP 分配池
+	cidrStr   string                              // 首个客户端注册的 CIDR
 	ipToTun   map[string]protocol.FrameReadWriter // 目标 IP → 客户端隧道
 	indexToIP map[int]string                      // index → 分配的 IP
 }
@@ -41,7 +45,89 @@ func NewServerTUNContext() (*ServerTUNContext, error) {
 	return ctx, nil
 }
 
-// tunReadLoop 在后台从服务端 TUN 设备读取 IP 包，根据目标 IP 路由到对应客户端。
+// ---- 设备信息 ----
+
+func (ctx *ServerTUNContext) DevName() string { return ctx.dev.Name() }
+func (ctx *ServerTUNContext) Close() error    { return ctx.dev.Close() }
+func (ctx *ServerTUNContext) WriteToTUN(packet []byte) error {
+	_, err := ctx.dev.Write(packet)
+	return err
+}
+
+// ---- IP 池管理 ----
+
+// ensurePool 初始化或校验 IP 池。首次调用时创建池并配置 TUN 设备。
+func (ctx *ServerTUNContext) ensurePool(cidr string) error {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+
+	if ctx.pool != nil {
+		if cidr != ctx.cidrStr {
+			return fmt.Errorf("CIDR mismatch: pool is %s, got %s", ctx.cidrStr, cidr)
+		}
+		return nil
+	}
+
+	pool, err := tun.NewPool(cidr)
+	if err != nil {
+		return err
+	}
+	ctx.pool = pool
+	ctx.cidrStr = cidr
+
+	if err := configureTUNDevice(ctx.dev.Name(), pool.GatewayIP(), pool.MaskSize()); err != nil {
+		return err
+	}
+
+	log.Printf("[tun] server device %s up, cidr=%s, capacity=%d", ctx.dev.Name(), cidr, pool.Capacity())
+	return nil
+}
+
+// ---- 客户端路由 ----
+
+// RegisterClient 为 TUN 客户端分配 IP 并建立 IP → 隧道路由。返回分配的 IP。
+func (ctx *ServerTUNContext) RegisterClient(conn protocol.FrameReadWriter, index int, cidr string) (string, error) {
+	if err := ctx.ensurePool(cidr); err != nil {
+		return "", err
+	}
+
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+
+	clientIP := ctx.pool.ClientIP(index)
+	if clientIP == nil {
+		return "", fmt.Errorf("index %d out of range (capacity=%d)", index, ctx.pool.Capacity())
+	}
+
+	ipStr := clientIP.String()
+
+	// 清理旧路由（重连场景）
+	if old, ok := ctx.ipToTun[ipStr]; ok {
+		old.Close()
+	}
+	if oldIP, ok := ctx.indexToIP[index]; ok {
+		delete(ctx.ipToTun, oldIP)
+	}
+
+	ctx.ipToTun[ipStr] = conn
+	ctx.indexToIP[index] = ipStr
+	log.Printf("[tun] client index=%d → %s", index, ipStr)
+	return ipStr, nil
+}
+
+// UnregisterClient 移除客户端的 IP 路由映射。
+func (ctx *ServerTUNContext) UnregisterClient(index int) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	if ipStr, ok := ctx.indexToIP[index]; ok {
+		delete(ctx.ipToTun, ipStr)
+		delete(ctx.indexToIP, index)
+	}
+}
+
+// ---- 后台读循环 ----
+
+// tunReadLoop 从服务端 TUN 设备读取 IP 包，根据目标 IP 路由到对应客户端。
 func (ctx *ServerTUNContext) tunReadLoop() {
 	buf := make([]byte, 64*1024)
 	for {
@@ -69,97 +155,10 @@ func (ctx *ServerTUNContext) tunReadLoop() {
 	}
 }
 
-// ensurePool 确保 IP 池已初始化（首个客户端注册时）。若已存在则校验 CIDR 一致性。
-func (ctx *ServerTUNContext) ensurePool(cidr string) error {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-
-	if ctx.pool != nil {
-		if cidr != ctx.cidrStr {
-			return fmt.Errorf("CIDR mismatch: pool is %s, got %s", ctx.cidrStr, cidr)
-		}
-		return nil
-	}
-
-	pool, err := tun.NewPool(cidr)
-	if err != nil {
-		return err
-	}
-
-	ctx.pool = pool
-	ctx.cidrStr = cidr
-
-	// 配置 TUN 设备 IP 并启用
-	gw := pool.GatewayIP()
-	mask := pool.MaskSize()
-	addr := fmt.Sprintf("%s/%d", gw.String(), mask)
-
-	if err := exec.Command("ip", "addr", "add", addr, "dev", ctx.dev.Name()).Run(); err != nil {
-		return fmt.Errorf("ip addr add %s dev %s: %w", addr, ctx.dev.Name(), err)
-	}
-	if err := exec.Command("ip", "link", "set", ctx.dev.Name(), "up").Run(); err != nil {
-		return fmt.Errorf("ip link set %s up: %w", ctx.dev.Name(), err)
-	}
-
-	log.Printf("[tun] server device %s up, cidr=%s, capacity=%d", ctx.dev.Name(), cidr, pool.Capacity())
-	return nil
-}
-
-// RegisterClient 为 TUN 客户端分配 IP 并建立 IP → 隧道路由。返回分配的 IP 字符串。
-func (ctx *ServerTUNContext) RegisterClient(conn protocol.FrameReadWriter, index int, cidr string) (string, error) {
-	if err := ctx.ensurePool(cidr); err != nil {
-		return "", err
-	}
-
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-
-	clientIP := ctx.pool.ClientIP(index)
-	if clientIP == nil {
-		return "", fmt.Errorf("index %d out of range (capacity=%d)", index, ctx.pool.Capacity())
-	}
-
-	ipStr := clientIP.String()
-
-	// 清理旧路由条目
-	if oldTun, ok := ctx.ipToTun[ipStr]; ok {
-		oldTun.Close()
-	}
-	if oldIP, ok := ctx.indexToIP[index]; ok {
-		delete(ctx.ipToTun, oldIP)
-	}
-
-	ctx.ipToTun[ipStr] = conn
-	ctx.indexToIP[index] = ipStr
-
-	log.Printf("[tun] client index=%d → %s", index, ipStr)
-	return ipStr, nil
-}
-
-// UnregisterClient 移除客户端的 IP 路由映射。
-func (ctx *ServerTUNContext) UnregisterClient(index int) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if ipStr, ok := ctx.indexToIP[index]; ok {
-		delete(ctx.ipToTun, ipStr)
-		delete(ctx.indexToIP, index)
-	}
-}
-
-// WriteToTUN 将原始 IP 包写入服务端 TUN 设备。
-func (ctx *ServerTUNContext) WriteToTUN(packet []byte) error {
-	_, err := ctx.dev.Write(packet)
-	return err
-}
-
-// DevName 返回服务端 TUN 设备的名称。
-func (ctx *ServerTUNContext) DevName() string { return ctx.dev.Name() }
-
-// Close 关闭服务端 TUN 设备。
-func (ctx *ServerTUNContext) Close() error { return ctx.dev.Close() }
+// ---- TUN 转发循环 ----
 
 // serverTUNRelayLoop 在服务端为每个 TUN 客户端运行转发循环：
-// 从客户端接收 TypeDataTUN 帧 → 写入服务端 TUN 设备。
+// 客户端帧 → 服务端 TUN 设备。
 func serverTUNRelayLoop(conn protocol.FrameReadWriter, ctx *ServerTUNContext, index int) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
@@ -176,11 +175,32 @@ func serverTUNRelayLoop(conn protocol.FrameReadWriter, ctx *ServerTUNContext, in
 	ctx.UnregisterClient(index)
 }
 
-// ---- 客户端 TUN ----
+// ============================================================================
+// OS 级 TUN 设备配置
+// ============================================================================
 
-// runTUNListener 在客户端创建本地 TUN 设备并启动双向转发：
-//   goroutine: 本地 TUN → Session（发送 IP 包到服务端）
-//   主循环:    Session → 本地 TUN（接收来自服务端的 IP 包）
+// configureTUNDevice 给 TUN 设备分配 IP 地址并启用。
+func configureTUNDevice(devName string, gwIP net.IP, maskSize int) error {
+	addr := fmt.Sprintf("%s/%d", gwIP.String(), maskSize)
+	if err := exec.Command("ip", "addr", "add", addr, "dev", devName).Run(); err != nil {
+		return fmt.Errorf("ip addr add %s dev %s: %w", addr, devName, err)
+	}
+	if err := exec.Command("ip", "link", "set", devName, "up").Run(); err != nil {
+		return fmt.Errorf("ip link set %s up: %w", devName, err)
+	}
+	return nil
+}
+
+// ============================================================================
+// 客户端 TUN
+// ============================================================================
+
+// runTUNListener 在客户端创建本地 TUN 设备并启动双向转发。
+//
+// 架构：
+//
+//	goroutine: 本地 TUN → Session（上传 IP 包到服务端）
+//	主循环:    Session → 本地 TUN（接收服务端的 IP 包）
 func runTUNListener(sess *session.Session, cidr string, index int, assignedIP string) error {
 	devName := fmt.Sprintf("crfl%d", index)
 
@@ -194,37 +214,36 @@ func runTUNListener(sess *session.Session, cidr string, index int, assignedIP st
 	defer dev.Close()
 	defer exec.Command("ip", "link", "del", devName).Run()
 
-	// 配置 TUN 设备 IP 并启用
-	addr := assignedIP
-	_, nw, _ := net.ParseCIDR(cidr)
-	if nw != nil {
-		ones, _ := nw.Mask.Size()
-		addr = fmt.Sprintf("%s/%d", assignedIP, ones)
-	}
-	if err := exec.Command("ip", "addr", "add", addr, "dev", dev.Name()).Run(); err != nil {
-		return fmt.Errorf("ip addr add %s dev %s: %w", addr, dev.Name(), err)
-	}
-	if err := exec.Command("ip", "link", "set", dev.Name(), "up").Run(); err != nil {
-		return fmt.Errorf("ip link set %s up: %w", dev.Name(), err)
+	// 配置 IP 并启用设备
+	if err := configureTUNDevice(dev.Name(), net.ParseIP(assignedIP), maskFromCIDR(cidr)); err != nil {
+		return err
 	}
 
-	// 发送：本地 TUN → Session
-	safeGo("tun-client-send", func() {
-		buf := make([]byte, 64*1024)
-		for {
-			n, err := dev.Read(buf)
-			if err != nil {
-				return
-			}
-			packet := make([]byte, n)
-			copy(packet, buf[:n])
-			if err := sess.Send(protocol.TypeDataTUN, packet); err != nil {
-				return
-			}
+	// 发送方向：本地 TUN → Session
+	safeGo("tun-client-send", func() { tunSendLoop(sess, dev) })
+
+	// 接收方向：Session → 本地 TUN
+	return tunRecvLoop(sess, dev)
+}
+
+// tunSendLoop 从本地 TUN 设备读取 IP 包并发送到 Session。
+func tunSendLoop(sess *session.Session, dev *tun.Dev) {
+	buf := make([]byte, 64*1024)
+	for {
+		n, err := dev.Read(buf)
+		if err != nil {
+			return
 		}
-	})
+		packet := make([]byte, n)
+		copy(packet, buf[:n])
+		if err := sess.Send(protocol.TypeDataTUN, packet); err != nil {
+			return
+		}
+	}
+}
 
-	// 接收：Session → 本地 TUN
+// tunRecvLoop 从 Session 接收 IP 包并写入本地 TUN 设备。
+func tunRecvLoop(sess *session.Session, dev *tun.Dev) error {
 	for frame := range sess.FrameCh() {
 		if frame.Type == protocol.TypeDataTUN {
 			if _, err := dev.Write(frame.Payload); err != nil {
@@ -235,14 +254,23 @@ func runTUNListener(sess *session.Session, cidr string, index int, assignedIP st
 	return fmt.Errorf("session closed")
 }
 
-// configureTUNClient 构造 TUN 监听器的注册载荷。
-// 格式：listener[,<index>],tun,<cidr>
+// ============================================================================
+// TUN 工具函数
+// ============================================================================
+
+// maskFromCIDR 从 CIDR 字符串中提取子网掩码位数。
+func maskFromCIDR(cidr string) int {
+	_, nw, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return 0
+	}
+	ones, _ := nw.Mask.Size()
+	return ones
+}
+
+// 构造 TUN 的注册载荷
+// listener[,<index>],tun,<cidr>
 func configureTUNClient(listenSpec string, wantIndex int) (regPayload string, cidr string) {
 	cidr = listenSpec
-	if wantIndex >= 0 {
-		regPayload = fmt.Sprintf("listener,%d,tun,%s", wantIndex, cidr)
-	} else {
-		regPayload = fmt.Sprintf("listener,tun,%s", cidr)
-	}
-	return regPayload, cidr
+	return formatRegPayload("listener", wantIndex, "tun", cidr), cidr
 }

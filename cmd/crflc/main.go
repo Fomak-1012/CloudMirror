@@ -1,4 +1,3 @@
-// crflc 是 CloudMirror 客户端，可作为 listener 或 forwarder 连接到服务端。
 package main
 
 import (
@@ -21,8 +20,8 @@ func main() {
 	wantIndex := flag.Int("i", -1, "expected index (-1 = auto)")
 	tcpOnly := flag.Bool("t", false, "TCP only")
 	udpOnly := flag.Bool("u", false, "UDP only")
-	tlsMode := flag.Bool("tls", false, "use TLS with certificate verification")
-	tlsInsecure := flag.Bool("tls-insecure", false, "skip TLS verification (testing only)")
+	fileSend := flag.String("send", "", "file path to send (file mode)")
+	fileRecv := flag.String("recv", "", "output directory to receive files (file mode)")
 	flag.Parse()
 
 	if *serverIP == "" || *password == "" {
@@ -31,8 +30,8 @@ func main() {
 	if *tcpOnly && *udpOnly {
 		log.Fatal("-t and -u cannot be used together")
 	}
-	if *tlsMode && *tlsInsecure {
-		log.Fatal("-tls and -tls-insecure cannot be used together")
+	if *fileSend != "" && *fileRecv != "" {
+		log.Fatal("--send and --recv cannot be used together")
 	}
 
 	isTUN := strings.Contains(*listenPort, "/")
@@ -45,7 +44,8 @@ func main() {
 	defer cancel()
 
 	err := relay.RunClient(ctx, *serverIP, *serverPort, *password,
-		*forwardPort, *listenPort, *wantIndex, *udpOnly, *tlsMode, *tlsInsecure)
+		*forwardPort, *listenPort, *wantIndex, *udpOnly,
+		*fileSend, *fileRecv)
 	if err != nil {
 		log.Fatalf("fatal: %v", err)
 	}

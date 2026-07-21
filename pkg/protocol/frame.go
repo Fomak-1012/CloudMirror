@@ -1,7 +1,5 @@
-// Package protocol 定义 CloudMirror 的二进制帧协议格式和帧类型常量。
 package protocol
 
-// 帧类型常量。每个帧由 1 字节类型 + 3 字节长度 + 可变载荷组成。
 const (
 	TypeAuth      byte = 0x01 // 客户端 → 服务端：认证请求，载荷为密码
 	TypeAuthOK    byte = 0x02 // 服务端 → 客户端：认证通过
@@ -14,10 +12,12 @@ const (
 	TypeError     byte = 0x09 // 错误响应，载荷为错误描述
 	TypeKeepalive byte = 0x0A // 心跳帧，无载荷，用于保持连接活跃
 	TypeDataTUN   byte = 0x0B // TUN 模式 IP 包，载荷为原始 IP 数据报
+	TypeFileMeta  byte = 0x0C // 文件传输：元信息，载荷 [2B 文件名长度][文件名][8B 大小]
+	TypeFileData  byte = 0x0D // 文件传输：数据块，载荷 [4B 块序号][数据]
+	TypeFileEnd   byte = 0x0E // 文件传输：结束标记，载荷 [4B 总块数]
 )
 
-// Frame 表示一帧协议数据，包含帧类型和可选的载荷数据。
 type Frame struct {
-	Type    byte   // 帧类型，参见 Type* 常量
-	Payload []byte // 载荷数据，可能为 nil
+	Type    byte
+	Payload []byte
 }
